@@ -25,3 +25,6 @@ deploy/daban_paper/reports/
 
 # Local course notes / third-party material (kept out of the repo)
 z 说交易/
+
+# local GitHub CLI auth (contains a token; never commit)
+.gh-config/
