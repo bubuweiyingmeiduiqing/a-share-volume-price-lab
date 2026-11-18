@@ -26,6 +26,8 @@
 | [`feasibility/scenarios.py`](feasibility/scenarios.py) | 多情景对比（纪律 / 边际 / 周转 / 摩擦 / 槽位） |
 | [`feasibility/charts.py`](feasibility/charts.py) | 出图 |
 | [`deploy/daban_paper/`](deploy/daban_paper/) | **打板模拟盘代码**（已部署到 VPS，每交易日 16:10 自动跑 + 微信推送） |
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | **部署纪律**：VPS 代码只能来自仓库 commit，统一用 `deploy_vps.sh` 部署 |
+| [`deploy/deploy_vps.sh`](deploy/deploy_vps.sh) | VPS 唯一部署入口：fetch → 校验 commit → 自检 → rsync → 写部署清单 |
 | [`docs/03_常规版_量价择时系统_v1.0.md`](docs/03_常规版_量价择时系统_v1.0.md) | **常规版机制**：八条口诀 → 门控/选股/持有/卖出/推送 |
 | [`docs/04_常规版_参数手册.md`](docs/04_常规版_参数手册.md) | 常规版 113 个标准参数的默认值、区间、敏感度、口诀映射 |
 | [`config/regular_v1.yaml`](config/regular_v1.yaml) | 常规版唯一参数源（62 个可调 / 51 个冻结，3 个风险档） |
@@ -114,6 +116,19 @@ python3 run_daily.py                # 真实数据 + 推送
 17:10 `watchdog.py` 做推送/数据体检，正常不打扰、异常才告警。
 
 详见 [`docs/03_常规版_量价择时系统_v1.0.md`](docs/03_常规版_量价择时系统_v1.0.md)。
+
+## 部署纪律
+
+**VPS 上运行的代码，必须来源于 GitHub 仓库的某个 commit。**
+
+统一入口：`deploy/deploy_vps.sh`。它只接受 `origin/main` 上的 commit，
+先 `git archive` 到临时目录跑自检，再同步代码，并写
+`state/deploy_manifest.json`（commit + 每个文件的 sha256）。
+
+禁止：SSH 到 VPS 直接改 `.py`、`scp` 本地未提交文件、手改部署清单。
+`status.py` 与 17:10 的 `watchdog.py` 会校验运行代码与清单是否一致；
+发现 `code_drift` 就应从仓库重新部署，而不是在 VPS 上修。
+详见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
 
 ## 下一步
 

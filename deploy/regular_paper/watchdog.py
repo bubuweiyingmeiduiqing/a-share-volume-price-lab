@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 import data as dm
+import deploy_check
 import portfolio as pf
 import push as pusher
 import review as rev
@@ -212,6 +213,21 @@ def run(date: str | None = None, do_push: bool = True, retry: bool = True,
             "equity_gap",
             "- 上一交易日净值未记录：" + "、".join(dm.dash(x) for x in fresh_gap)
             + "。当天可能没有结算，回看 `logs/cron.log`。"
+        ))
+
+    # 部署纪律：运行目录里的代码必须与最近一次仓库部署清单一致。
+    dc = deploy_check.check(state_dir.parent)
+    if not dc.get("present"):
+        alerts.append((
+            "no_manifest",
+            "- 未找到 `state/deploy_manifest.json`：当前代码可能不是从仓库部署的。"
+            "\n  请用 `~/a-share-volume-price-lab/deploy/deploy_vps.sh` 从 commit 重新部署。"
+        ))
+    elif not dc.get("ok"):
+        alerts.append((
+            "code_drift",
+            "- VPS 代码与部署清单不一致：" + deploy_check.summary(dc)
+            + "。\n  禁止直接改 VPS；请提交到仓库后重新部署。"
         ))
 
     # 正常日不推；异常按 (日期, 告警码) 去重。

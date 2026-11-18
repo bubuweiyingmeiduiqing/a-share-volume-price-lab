@@ -50,6 +50,20 @@
 
 ---
 
+## 部署（生产）
+
+**不要直接改 VPS 上的文件。** 统一从仓库 commit 部署：
+
+```bash
+ssh vps
+cd ~/a-share-volume-price-lab
+git pull --ff-only
+./deploy/deploy_vps.sh --app daban --commit origin/main
+```
+
+脚本会保留 `state/cache/logs/reports`，并写 `state/deploy_manifest.json`。
+详见 [`../../DEPLOYMENT.md`](../../DEPLOYMENT.md)。
+
 ## 运行
 
 ```bash

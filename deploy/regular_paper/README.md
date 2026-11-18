@@ -52,6 +52,7 @@
 | `push.py` | PushPlus 多 token 容错 |
 | `review.py` | 推送计数 + 每 5 次收盘推送复盘 + 参数调整建议 |
 | `watchdog.py` | 收盘后体检：盘前/收盘推送是否齐全、净值是否缺日；缺收盘自动补跑，异常才推送 |
+| `deploy_check.py` | 校验运行代码与 `state/deploy_manifest.json` 是否一致（防止直接改 VPS） |
 | `replan.py` | 改参数/规则后只重算明日计划，不结算、不推送、不重复计数 |
 | `status.py` | 账户/持仓/逐笔/状态速查 |
 | `synthetic.py` | 合成行情，供 `--demo` 和自检使用 |
@@ -59,6 +60,21 @@
 | `gen_param_doc.py` | 从 YAML 生成参数手册 |
 
 ---
+
+## 部署（生产）
+
+**不要直接改 VPS 上的文件。** 生产部署只从仓库 commit 走统一脚本：
+
+```bash
+ssh vps
+cd ~/a-share-volume-price-lab
+git pull --ff-only
+./deploy/deploy_vps.sh --app regular --commit origin/main
+```
+
+脚本会先自检，再同步代码；`state/cache/logs/reports/demo` 不会被覆盖，
+并写 `state/deploy_manifest.json`。`status.py` 显示部署 commit，
+`watchdog.py` 会告警 `code_drift`。详见 [`../../DEPLOYMENT.md`](../../DEPLOYMENT.md)。
 
 ## 安装
 

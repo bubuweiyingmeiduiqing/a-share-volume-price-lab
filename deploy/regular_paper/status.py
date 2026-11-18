@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections import Counter
 
+import deploy_check
 import portfolio as pf
 import regime as rg
 from review import load_counter
@@ -78,6 +79,13 @@ def main(state_dir=None) -> None:
     nxt = ((int(c.get("close_pushes", 0)) // every) + 1) * every
     print(f"推送：收盘 {c.get('close_pushes', 0)} 次｜盘前 {c.get('premarket_pushes', 0)} 次｜"
           f"下次复盘在收盘推送 #{nxt}")
+    dc = deploy_check.check(state_dir.parent)
+    if dc.get("present"):
+        flag = "✅" if dc.get("ok") else "⚠️"
+        print(f"部署：commit {dc.get('commit', '')[:8]}｜{dc.get('deployed_at', '')}｜"
+              f"代码清单 {flag} {deploy_check.summary(dc)}")
+    else:
+        print(f"部署：⚠️ {deploy_check.summary(dc)}")
     print("=" * 70)
 
 

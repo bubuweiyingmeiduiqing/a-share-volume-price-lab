@@ -30,6 +30,7 @@ import pandas as pd
 import yaml
 
 import data as dm
+import deploy_check as dc
 import portfolio as pf
 import regime as rg
 import review as rv
@@ -355,6 +356,25 @@ class RegularPaperTest(unittest.TestCase):
                 # 同一天重复推送不重复计数
                 rv.note_push("close", "20261105", self.params, state, reports)
                 self.assertEqual(rv.load_counter(state)["close_pushes"], 5)
+
+    def test_deploy_manifest_check(self):
+        with tempfile.TemporaryDirectory() as td:
+            rt = Path(td)
+            (rt / "state").mkdir()
+            (rt / "a.py").write_text("print(1)\n", encoding="utf-8")
+            manifest = {
+                "commit": "abc123", "deployed_at": "now",
+                "files": {"a.py": dc.sha256_file(rt / "a.py")},
+            }
+            (rt / "state" / "deploy_manifest.json").write_text(
+                __import__("json").dumps(manifest), encoding="utf-8")
+            self.assertTrue(dc.check(rt)["ok"])
+            (rt / "a.py").write_text("print(2)\n", encoding="utf-8")
+            self.assertFalse(dc.check(rt)["ok"])
+            (rt / "b.py").write_text("print(3)\n", encoding="utf-8")
+            res = dc.check(rt)
+            self.assertIn("a.py", res["bad"])
+            self.assertIn("b.py", res["extra"])
 
     def test_premarket_stale_plan_pushes_notice(self):
         with tempfile.TemporaryDirectory() as td:
