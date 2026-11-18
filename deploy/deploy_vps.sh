@@ -143,7 +143,9 @@ deploy_one() {
 
     # 同步后做 import 检查；失败自动回滚代码
     log "[$app] import 检查"
-    if ! ( cd "$dst" && python3 -c "import run_daily, deploy_check" ); then
+    local import_check="import run_daily"
+    [ "$app" = "regular" ] && import_check="import run_daily, deploy_check"
+    if ! ( cd "$dst" && python3 -c "$import_check" ); then
         log "[$app] import 失败，回滚"
         if [ -d "$backup" ] && [ -n "$(ls -A "$backup" 2>/dev/null)" ]; then
             rsync -a --delete \
