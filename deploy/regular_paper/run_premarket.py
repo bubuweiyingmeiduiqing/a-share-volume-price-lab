@@ -103,6 +103,21 @@ def heartbeat(date: str, plan: dict, reg_state: str, acct: dict, params) -> str:
     return "\n".join(L)
 
 
+def stale_notice(date: str, plan: dict, acct: dict, params) -> str:
+    """昨日收盘失败导致计划没更新时，盘前也要推一条，不能静默跳过。"""
+    eq = pf.equity(acct)
+    target = plan.get("for_date") or "无"
+    L = [f"## {params.rt('push', 'title_prefix', default='常规量价模拟盘')} · 盘前 {dm.dash(date)}", ""]
+    L.append(f"**⚠️ 昨日计划未更新**：计划目标日 `{target}` ≠ 今日 `{date}`。")
+    L.append("今天不执行任何条件单、不交易；先查昨日 16:20 收盘任务。")
+    L.append(f"账户 {eq:,.0f}｜持仓 {len(acct['positions'])}/{params.get('portfolio.slots')}")
+    L.append("")
+    L.append("> 常见原因：昨日收盘失败或数据源未更新。"
+             "`tail -50 ~/regular_paper/logs/cron.log`。")
+    L.append("> 模拟盘，非投资建议。")
+    return "\n".join(L)
+
+
 def run(date: str | None, do_push: bool, params,
         state_dir=None, report_dir=None) -> int:
     today = dm.norm_date(date) if date else dt.date.today().strftime("%Y%m%d")
@@ -119,13 +134,30 @@ def run(date: str | None, do_push: bool, params,
     state_dir = Path(state_dir or STATE_DIR)
     report_dir = Path(report_dir or REPORT_DIR)
     plan = load_plan(state_dir / "plan.json")
+    acct = pf.load(params, state_dir / "account.json")
     if plan.get("for_date") != date:
-        print(f"[info] 计划日期 {plan.get('for_date')} ≠ {date}，跳过")
+        print(f"[info] 计划日期 {plan.get('for_date')} ≠ {date}，推一条计划未更新提醒")
+        text = stale_notice(date, plan, acct, params)
+        print(text)
+        try:
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / f"{dm.dash(date)}-premarket.md").write_text(text, encoding="utf-8")
+        except Exception:
+            pass
+        if do_push:
+            title = (f"[{params.rt('push', 'title_prefix', default='常规量价模拟盘')}] "
+                     f"{dm.dash(date)[5:]} 盘前 ⚠️ 计划未更新")
+            n = pusher.push(title, text, params)
+            print(f"[info] push 成功 token 数 {n}")
+            if n > 0:
+                try:
+                    rev.note_push("premarket", date, params, state_dir, report_dir)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[warn] 盘前推送计数失败：{e}")
         return 0
 
     reg = rg.load(state_dir / "regime.json")
     reg_state = reg.get("current") or plan.get("state") or "COLD"
-    acct = pf.load(params, state_dir / "account.json")
     cands = plan.get("candidates", [])
 
     text = build(date, plan, reg_state, acct, params) if cands else heartbeat(

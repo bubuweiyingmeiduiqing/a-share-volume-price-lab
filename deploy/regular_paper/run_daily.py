@@ -242,6 +242,7 @@ def _review_section(date: str, market: dm.MarketData, params, res, acct: dict,
     prev_cands = prev_plan.get("candidates", []) if prev_ok else []
     buys = [x for x in fills if x.get("action") == "买入"]
     skips = [x for x in fills if x.get("action") in ("未成交", "跳过", "整体跳过")]
+    plan_problem: str | None = None
 
     if prev_ok:
         line = f"- 计划执行：昨日计划 {len(prev_cands)} 只候选 → 买入 {len(buys)} 只"
@@ -255,8 +256,11 @@ def _review_section(date: str, market: dm.MarketData, params, res, acct: dict,
         L.append(line)
     elif prev_plan:
         L.append(f"- 计划执行：昨日计划目标日 {prev_plan.get('for_date')} 与今日不符，未执行")
+        plan_problem = f"昨日计划未更新（目标日 {prev_plan.get('for_date')}）"
     else:
         L.append("- 计划执行：无昨日计划（首次运行或计划缺失）")
+        if acct.get("equity_history"):
+            plan_problem = "无昨日计划（plan.json 缺失）"
 
     parts: list[str] = []
     for p in acct.get("positions", []):
@@ -276,7 +280,7 @@ def _review_section(date: str, market: dm.MarketData, params, res, acct: dict,
 
     # 运行体检：推送是否齐全、指数日期、净值记录是否连续
     checks: list[str] = []
-    problems: list[str] = []
+    problems: list[str] = [plan_problem] if plan_problem else []
     c: dict = {}
     if state_dir is not None:
         try:

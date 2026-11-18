@@ -34,6 +34,7 @@ import portfolio as pf
 import regime as rg
 import review as rv
 import run_daily as rd
+import run_premarket as rp
 import strategy as stg
 import synthetic as sy
 from config import ConfigError, Params, load_params
@@ -354,6 +355,22 @@ class RegularPaperTest(unittest.TestCase):
                 # 同一天重复推送不重复计数
                 rv.note_push("close", "20261105", self.params, state, reports)
                 self.assertEqual(rv.load_counter(state)["close_pushes"], 5)
+
+    def test_premarket_stale_plan_pushes_notice(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "state"
+            reports = Path(td) / "reports"
+            sy.seed_demo_account(self.params, self.market, state, force=True)
+            (state / "plan.json").write_text(
+                '{"for_date": "20260101", "candidates": []}', encoding="utf-8")
+            with mock.patch.object(rp.pusher, "push", return_value=2):
+                rc = rp.run(self.market.date, True, self.params, state, reports)
+            self.assertEqual(rc, 0)
+            text = (reports / f"{dm.dash(self.market.date)}-premarket.md").read_text(encoding="utf-8")
+            self.assertIn("昨日计划未更新", text)
+            c = rv.load_counter(state)
+            self.assertEqual(c["premarket_pushes"], 1)
+            self.assertEqual(c["last_premarket_date"], self.market.date)
 
     def test_manual_review_label_and_next_count(self):
         with tempfile.TemporaryDirectory() as td:
