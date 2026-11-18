@@ -106,6 +106,7 @@ cd ~/a-share-volume-price-lab
 部署清单写入后，以下位置会校验“运行代码 = 清单”：
 
 - `python3 ~/regular_paper/status.py`：打印部署 commit 与清单状态；
+- `python3 ~/regular_paper/deploy_check.py ~/daban_paper`：单独校验打板版；
 - `python3 ~/regular_paper/watchdog.py`：17:10 体检时若发现
   `code_drift` / `no_manifest`，会推送告警；
 - 清单缺失、文件被改、出现清单外的 `.py`，都算不一致。
