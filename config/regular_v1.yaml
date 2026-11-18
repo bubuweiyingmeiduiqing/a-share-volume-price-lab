@@ -1,0 +1,1373 @@
+# =============================================================================
+# 常规量价模拟盘 v1.0 —— 标准参数表
+# 对应文档：docs/03_常规版_量价择时系统_v1.0.md
+#
+# 设计原则：
+#   1. 代码只通过 "模块.对象.指标" 形式的 id 读取参数，不在代码里写死阈值。
+#   2. 每个参数都有单位、允许区间、敏感度、对应口诀，方便复盘时只改一个。
+#   3. tunable: false 的是结构/执行假设，不是“懒得调”，而是改了就不再是同一套系统。
+#   4. 所有 pct 都是小数：0.05 = 5%；x 是倍数：1.5 = 1.5 倍；day 是交易日。
+#
+# 调参纪律（与打板盘一致）：
+#   - 每季度最多改 1 个参数，且必须有改前/改后假设与样本。
+#   - 回撤期禁止调参；先判断是“规则失效”还是“风格不适”。
+#   - 优先改 sensitivity: high 的择时/量价参数，不要一次改多个。
+# =============================================================================
+
+meta:
+  system: regular_paper
+  name: "常规量价模拟盘"
+  version: "1.1.0"
+  updated: "2026-11-12"
+  market: A_SHARE
+  timeframe: 1d
+  execution: next_open
+  description: >
+    以“买横买坑、不买竖”为选股骨架，以“人声鼎沸/连续大涨/冲高回落/放量急跌”
+    为卖出梯度，用市场温度做总仓位门控的日线级常规波段模拟盘。
+  conventions:
+    pct: "小数，0.05 = 5%"
+    x: "倍数，1.5 = 1.5 倍"
+    day: "交易日"
+    score: "0-100 分"
+  profiles: [defensive, balanced, offensive]
+  # 第一线参数：复盘时优先只动这些，其余二线/冻结参数不要和它们一起改
+  tuning_priority:
+    - timing.cold_heat
+    - timing.trend_heat
+    - timing.hot_heat
+    - timing.cap_trend
+    - timing.cap_hot
+    - timing.crash_day
+    - timing.crash_vol
+    - selection.pit_min_depth
+    - selection.pit_max_depth
+    - selection.pit_vol_max
+    - selection.deep_pit_depth
+    - selection.vertical_ret5
+    - selection.vertical_ma20_dist
+    - selection.min_score
+    - entry.gap_max
+    - entry.stop_loss
+    - entry.size_mult_deep_pit
+    - entry.size_mult_cold_deep_pit
+    - portfolio.cold_max_positions
+    - holding.washout_vol
+    - holding.climax_big_up_days
+    - holding.trail_pct
+    - exit.volume_dump_vol
+    - portfolio.risk_per_trade
+    - portfolio.max_weight
+
+# -----------------------------------------------------------------------------
+# 风险档位：只覆盖 tunable 参数；不改变规则结构
+# -----------------------------------------------------------------------------
+profiles:
+  defensive:
+    description: "低风险：单笔风险 0.8%，趋势仓上限 70%，只做高分信号"
+    overrides:
+      portfolio.risk_per_trade: 0.008
+      portfolio.max_weight: 0.22
+      portfolio.max_portfolio_heat: 0.035
+      timing.cap_trend: 0.70
+      timing.cap_hot: 0.30
+      entry.stop_loss: 0.06
+      selection.min_score: 65
+      exit.volume_dump_vol: 1.30
+  balanced:
+    description: "基准档：默认参数，不做覆盖"
+    overrides: {}
+  offensive:
+    description: "高风险：单笔风险 1.8%，允许更高趋势仓，接受更大回撤"
+    overrides:
+      portfolio.risk_per_trade: 0.018
+      portfolio.max_weight: 0.32
+      portfolio.max_portfolio_heat: 0.070
+      timing.cap_trend: 1.00
+      timing.cap_hot: 0.50
+      selection.min_score: 55
+      holding.trail_start: 0.12
+
+# =============================================================================
+# 一、股票池：先排除“不能做/不值得做”的票
+# =============================================================================
+parameters:
+
+  universe.min_price:
+    value: 2.0
+    unit: yuan
+    range: [1.0, 10.0]
+    step: 0.5
+    tunable: false
+    sensitivity: medium
+    group: universe
+    aphorism: "不挖深坑不大买"
+    note: "低于 2 元的面值风险/仙股，尾部风险不对称。"
+
+  universe.min_float_mv:
+    value: 3000000000.0
+    unit: yuan
+    range: [500000000.0, 30000000000.0]
+    step: 500000000.0
+    tunable: true
+    sensitivity: medium
+    group: universe
+    aphorism: "不挖深坑不大买"
+    note: "流通市值 30 亿以下，承接与流动性不足，深坑容易变成无底洞。"
+
+  universe.min_amount_20d:
+    value: 100000000.0
+    unit: yuan
+    range: [20000000.0, 1000000000.0]
+    step: 10000000.0
+    tunable: true
+    sensitivity: high
+    group: universe
+    aphorism: "急跌放量立马撤"
+    note: "20 日平均成交额低于 1 亿，放量/无量的判断都不可靠，滑点也会吃掉边际。"
+
+  universe.max_scan:
+    value: 300
+    unit: count
+    range: [100, 800]
+    step: 50
+    tunable: true
+    sensitivity: high
+    group: universe
+    aphorism: "买横买坑"
+    note: "每日按成交额取前 N 只做全量日线扫描。N 越大越全，但首次拉取越慢。"
+
+  universe.min_history_days:
+    value: 120
+    unit: day
+    range: [80, 250]
+    step: 10
+    tunable: false
+    sensitivity: low
+    group: universe
+    aphorism: "不挖深坑不大买"
+    note: "至少 120 根日线，才能同时算 MA60、60 日高点与 20 日平台。"
+
+  universe.exclude_st:
+    value: true
+    unit: bool
+    tunable: false
+    sensitivity: low
+    group: universe
+    aphorism: "制度"
+    note: "ST/*ST 涨跌幅 5%，价格行为与常规票不可比。"
+
+  universe.exclude_bse:
+    value: true
+    unit: bool
+    tunable: false
+    sensitivity: low
+    group: universe
+    aphorism: "制度"
+    note: "北交所流动性不足，默认不做。"
+
+  universe.exclude_limit_up_today:
+    value: true
+    unit: bool
+    tunable: false
+    sensitivity: low
+    group: universe
+    aphorism: "不买竖"
+    note: "当日已涨停的票不进入次日开盘候选，避免把‘竖’当成‘横’。"
+
+# =============================================================================
+# 二、择时：市场温度 → 状态 → 总仓位上限
+# 口诀映射：卖在人声鼎沸处 / 急跌无量是洗盘 / 急跌放量立马撤
+# =============================================================================
+  timing.index_symbol:
+    value: "000300"
+    unit: code
+    choices: ["000300", "000905", "000852", "000985"]
+    tunable: false
+    sensitivity: low
+    group: timing
+    aphorism: "择时"
+    note: "基准指数。默认沪深 300；换指数等于换择时口径，不要中途随意换。"
+
+  timing.ma_fast:
+    value: 20
+    unit: day
+    range: [10, 30]
+    step: 1
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "买横买坑，不买竖"
+    note: "短期趋势线。越大越迟钝，越小越容易被洗。"
+
+  timing.ma_slow:
+    value: 60
+    unit: day
+    range: [40, 120]
+    step: 5
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "不挖深坑不大买"
+    note: "长期趋势线。深坑能否大买，先看指数和个股是否仍在 MA60 之上。"
+
+  timing.slope_window:
+    value: 5
+    unit: day
+    range: [3, 10]
+    step: 1
+    tunable: false
+    sensitivity: medium
+    group: timing
+    aphorism: "连续小涨要大涨"
+    note: "斜率窗口。用 5 日变化判断 MA20/MA60 是走平、上翘还是下压。"
+
+  timing.vol_window:
+    value: 20
+    unit: day
+    range: [10, 40]
+    step: 5
+    tunable: false
+    sensitivity: medium
+    group: timing
+    aphorism: "急跌放量立马撤"
+    note: "量能基准窗口。放量/无量都相对这个窗口的均值来判断。"
+
+  timing.weight_trend:
+    value: 0.30
+    unit: weight
+    range: [0.0, 1.0]
+    step: 0.05
+    tunable: false
+    sensitivity: high
+    group: timing
+    aphorism: "择时"
+    note: "趋势分权重。五个权重之和必须为 1.0。"
+
+  timing.weight_breadth:
+    value: 0.25
+    unit: weight
+    range: [0.0, 1.0]
+    step: 0.05
+    tunable: false
+    sensitivity: high
+    group: timing
+    aphorism: "卖在人声鼎沸处"
+    note: "市场宽度权重。宽度极端高时，往往就是‘人声鼎沸’。"
+
+  timing.weight_momentum:
+    value: 0.20
+    unit: weight
+    range: [0.0, 1.0]
+    step: 0.05
+    tunable: false
+    sensitivity: high
+    group: timing
+    aphorism: "连续小涨要大涨"
+    note: "指数 20 日动量权重。"
+
+  timing.weight_volume:
+    value: 0.15
+    unit: weight
+    range: [0.0, 1.0]
+    step: 0.05
+    tunable: false
+    sensitivity: high
+    group: timing
+    aphorism: "急跌放量立马撤"
+    note: "指数成交额/20 日均值权重。"
+
+  timing.weight_up:
+    value: 0.10
+    unit: weight
+    range: [0.0, 1.0]
+    step: 0.05
+    tunable: false
+    sensitivity: high
+    group: timing
+    aphorism: "卖在人声鼎沸处"
+    note: "上涨家数占比权重。"
+
+  timing.cold_heat:
+    value: 30
+    unit: score
+    range: [10, 45]
+    step: 1
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "买横买坑"
+    note: "低于此温度进入冰点：只留底仓，不开新仓。"
+
+  timing.trend_heat:
+    value: 55
+    unit: score
+    range: [40, 70]
+    step: 1
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "连续小涨要大涨"
+    note: "达到此温度且指数在 MA20 上方、MA60 上翘，进入趋势状态。"
+
+  timing.hot_heat:
+    value: 75
+    unit: score
+    range: [60, 90]
+    step: 1
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "卖在人声鼎沸处"
+    note: "达到此温度进入过热：仓位上限下调、停止开新仓。"
+
+  timing.crash_day:
+    value: 0.03
+    unit: pct
+    range: [0.015, 0.06]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "急跌放量立马撤"
+    note: "指数单日跌幅达到此值，进入急跌状态。"
+
+  timing.crash_ret5:
+    value: 0.06
+    unit: pct
+    range: [0.03, 0.12]
+    step: 0.01
+    tunable: false
+    sensitivity: medium
+    group: timing
+    aphorism: "急跌放量立马撤"
+    note: "指数 5 日累计跌幅达到此值，且放量，进入急跌状态。"
+
+  timing.crash_vol:
+    value: 1.20
+    unit: x
+    range: [1.0, 2.0]
+    step: 0.1
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "急跌放量立马撤"
+    note: "急跌判定所需的指数成交额放大倍数。低于此值视为缩量洗盘。"
+
+  timing.hot_extension:
+    value: 0.08
+    unit: pct
+    range: [0.04, 0.15]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "卖在人声鼎沸处"
+    note: "指数偏离 MA20 超过此值，即使温度不高也按过热处理。"
+
+  timing.hot_ret20:
+    value: 0.15
+    unit: pct
+    range: [0.08, 0.30]
+    step: 0.01
+    tunable: false
+    sensitivity: high
+    group: timing
+    aphorism: "连续大涨要离场"
+    note: "指数 20 日涨幅达到此值，按下过热处理。"
+
+  timing.washout_day:
+    value: 0.02
+    unit: pct
+    range: [0.01, 0.04]
+    step: 0.005
+    tunable: false
+    sensitivity: high
+    group: timing
+    aphorism: "急跌无量是洗盘"
+    note: "指数单日跌幅达到此值但缩量，视为洗盘而不是崩盘。"
+
+  timing.washout_vol:
+    value: 0.80
+    unit: x
+    range: [0.5, 1.0]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "急跌无量是洗盘"
+    note: "缩量阈值。指数急跌且成交额低于 20 日均值的这个倍数，不切急跌状态。"
+
+  timing.market_climax_heat:
+    value: 85
+    unit: score
+    range: [75, 95]
+    step: 1
+    tunable: false
+    sensitivity: high
+    group: timing
+    aphorism: "卖在人声鼎沸处"
+    note: "人声鼎沸的极端温度：除停止开仓外，盈利持仓减半。"
+
+  timing.hysteresis:
+    value: 5
+    unit: score
+    range: [2, 10]
+    step: 1
+    tunable: false
+    sensitivity: medium
+    group: timing
+    aphorism: "择时"
+    note: "状态迟滞带宽，防止温度在阈值附近来回跳。"
+
+  timing.min_dwell:
+    value: 2
+    unit: day
+    range: [1, 5]
+    step: 1
+    tunable: false
+    sensitivity: medium
+    group: timing
+    aphorism: "择时"
+    note: "最小驻留天数。急跌/过热可立即切换，其余状态至少驻留 2 日。"
+
+  timing.cap_cold:
+    value: 0.20
+    unit: weight
+    range: [0.0, 0.5]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "买横买坑"
+    note: "冰点总仓位上限。"
+
+  timing.cap_repair:
+    value: 0.50
+    unit: weight
+    range: [0.2, 0.8]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "买横买坑"
+    note: "修复期总仓位上限。"
+
+  timing.cap_trend:
+    value: 0.90
+    unit: weight
+    range: [0.4, 1.0]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "连续小涨要大涨"
+    note: "趋势期总仓位上限。"
+
+  timing.cap_hot:
+    value: 0.40
+    unit: weight
+    range: [0.0, 0.7]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "卖在人声鼎沸处"
+    note: "过热期总仓位上限。过热期只减不加。"
+
+  timing.cap_crash:
+    value: 0.00
+    unit: weight
+    range: [0.0, 0.3]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "急跌放量立马撤"
+    note: "急跌期总仓位上限。默认清仓。"
+
+  timing.cold_deep_pit_enabled:
+    value: true
+    unit: bool
+    tunable: true
+    sensitivity: high
+    group: timing
+    aphorism: "不挖深坑不大买"
+    note: "冰点期是否放行“深坑”形态。放行时也只允许深坑，不允许横盘/小涨；默认最多 1 只、风险预算减半。"
+
+# =============================================================================
+# 三、选股：横 / 坑 / 小涨 / 竖的排除
+# =============================================================================
+  selection.platform_window:
+    value: 20
+    unit: day
+    range: [10, 40]
+    step: 5
+    tunable: false
+    sensitivity: high
+    group: selection
+    aphorism: "买横"
+    note: "平台箱体的回看窗口。"
+
+  selection.platform_max_range:
+    value: 0.12
+    unit: pct
+    range: [0.06, 0.20]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "买横"
+    note: "箱体最大振幅（高/低-1）。越紧越像横盘。"
+
+  selection.platform_vol_max:
+    value: 0.90
+    unit: x
+    range: [0.6, 1.2]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "买横"
+    note: "5 日均量 / 20 日均量低于此值，视为横盘缩量。"
+
+  selection.platform_ma60_buffer:
+    value: 0.02
+    unit: pct
+    range: [0.0, 0.08]
+    step: 0.01
+    tunable: false
+    sensitivity: medium
+    group: selection
+    aphorism: "不挖深坑不大买"
+    note: "收盘价不低于 MA60 的 (1-buffer)，避免在长期趋势下方接横盘。"
+
+  selection.platform_edge_buffer:
+    value: 0.02
+    unit: pct
+    range: [0.0, 0.06]
+    step: 0.005
+    tunable: false
+    sensitivity: medium
+    group: selection
+    aphorism: "买横"
+    note: "箱体上下沿的容差：收盘在箱体内（含 2% 容差）才买，突破太多不追。"
+
+  selection.pit_lookback:
+    value: 10
+    unit: day
+    range: [5, 25]
+    step: 1
+    tunable: false
+    sensitivity: high
+    group: selection
+    aphorism: "买坑"
+    note: "坑的回看窗口：在最近 N 日里找‘高点→低点’的急跌。"
+
+  selection.pit_min_depth:
+    value: 0.12
+    unit: pct
+    range: [0.06, 0.20]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "买坑"
+    note: "浅坑下限。小于这个跌幅不算坑。"
+
+  selection.pit_max_depth:
+    value: 0.35
+    unit: pct
+    range: [0.22, 0.50]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "买坑"
+    note: "深坑上限。超过这个跌幅更像趋势破坏，不是洗盘。"
+
+  selection.pit_vol_max:
+    value: 0.90
+    unit: x
+    range: [0.6, 1.2]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "急跌无量是洗盘"
+    note: "下跌段平均量 / 20 日均量低于此值，才承认是‘无量坑’。放量下跌不买。"
+
+  selection.deep_pit_depth:
+    value: 0.25
+    unit: pct
+    range: [0.18, 0.35]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "不挖深坑不大买"
+    note: "深坑阈值。达到此深度且趋势未坏，才允许放大单笔风险。"
+
+  selection.vertical_ret5:
+    value: 0.12
+    unit: pct
+    range: [0.08, 0.20]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "不买竖"
+    note: "5 日涨幅达到此值，视为竖，直接排除。"
+
+  selection.vertical_ret10:
+    value: 0.20
+    unit: pct
+    range: [0.12, 0.40]
+    step: 0.02
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "不买竖"
+    note: "10 日涨幅达到此值，视为竖，直接排除。"
+
+  selection.vertical_ma20_dist:
+    value: 0.10
+    unit: pct
+    range: [0.05, 0.20]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "不买竖"
+    note: "收盘价高于 MA20 超过此值，视为偏离过大，不追。"
+
+  selection.vertical_big_up_days:
+    value: 2
+    unit: day
+    range: [1, 3]
+    step: 1
+    tunable: false
+    sensitivity: high
+    group: selection
+    aphorism: "连续大涨要离场"
+    note: "最近 3 日出现 N 根大阳线（≥4%），视为加速末端，不买。"
+
+  selection.small_rise_window:
+    value: 5
+    unit: day
+    range: [3, 8]
+    step: 1
+    tunable: false
+    sensitivity: high
+    group: selection
+    aphorism: "连续小涨要大涨"
+    note: "小涨序列的观察窗口。"
+
+  selection.small_rise_min:
+    value: 0.002
+    unit: pct
+    range: [0.0, 0.01]
+    step: 0.001
+    tunable: false
+    sensitivity: high
+    group: selection
+    aphorism: "连续小涨要大涨"
+    note: "单日小涨下限。太小可能是横盘噪声。"
+
+  selection.small_rise_max:
+    value: 0.030
+    unit: pct
+    range: [0.015, 0.05]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "连续小涨要大涨"
+    note: "单日小涨上限。超过此值算大阳线，不属于‘缓步推升’。"
+  selection.small_rise_cum_min:
+    value: 0.02
+    unit: pct
+    range: [0.01, 0.05]
+    step: 0.005
+    tunable: false
+    sensitivity: high
+    group: selection
+    aphorism: "连续小涨要大涨"
+    note: "小涨序列累计涨幅下限。"
+
+  selection.small_rise_cum_max:
+    value: 0.10
+    unit: pct
+    range: [0.06, 0.18]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "连续小涨要大涨"
+    note: "小涨序列累计涨幅上限。超过就不是‘小涨’，而是已经启动。"
+
+  selection.small_rise_min_count:
+    value: 3
+    unit: day
+    range: [2, 5]
+    step: 1
+    tunable: false
+    sensitivity: high
+    group: selection
+    aphorism: "连续小涨要大涨"
+    note: "窗口内至少 N 天满足小涨，才算连续小涨。"
+
+  selection.small_rise_vol_min:
+    value: 0.60
+    unit: x
+    range: [0.3, 1.2]
+    step: 0.05
+    tunable: false
+    sensitivity: medium
+    group: selection
+    aphorism: "连续小涨要大涨"
+    note: "小涨序列的量比下限。太低可能是没人管的横盘。"
+
+  selection.small_rise_vol_max:
+    value: 2.00
+    unit: x
+    range: [1.2, 3.0]
+    step: 0.1
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "连续小涨要大涨"
+    note: "小涨序列的量比上限。超过就是放量加速，不再是‘缓步推升’。"
+  selection.small_rise_close_pos:
+    value: 0.50
+    unit: frac
+    range: [0.3, 0.8]
+    step: 0.05
+    tunable: false
+    sensitivity: medium
+    group: selection
+    aphorism: "连续小涨要大涨"
+    note: "收盘位置下限。收在当日下半段的‘小涨’不算强势。"
+
+  selection.max_per_industry:
+    value: 2
+    unit: count
+    range: [1, 4]
+    step: 1
+    tunable: false
+    sensitivity: medium
+    group: selection
+    aphorism: "组合"
+    note: "单日计划中同行业最多保留几只。行业未知时不做限制。"
+
+  selection.min_score:
+    value: 60
+    unit: score
+    range: [40, 80]
+    step: 1
+    tunable: true
+    sensitivity: high
+    group: selection
+    aphorism: "买横买坑"
+    note: "候选最低评分。提高会减少交易，降低会引入噪声。"
+
+  selection.max_candidates:
+    value: 8
+    unit: count
+    range: [3, 20]
+    step: 1
+    tunable: false
+    sensitivity: medium
+    group: selection
+    aphorism: "买横买坑"
+    note: "每日计划最多保留的候选数，最终还会被槽位与仓位门控截断。"
+
+  selection.reclaim_ma:
+    value: 5
+    unit: day
+    range: [3, 10]
+    step: 1
+    tunable: false
+    sensitivity: medium
+    group: selection
+    aphorism: "买坑"
+    note: "坑底确认线：收盘重新站上 MA5。"
+
+# =============================================================================
+# 四、买入：次日开盘条件单
+# =============================================================================
+  entry.gap_min:
+    value: -0.025
+    unit: pct
+    range: [-0.05, 0.0]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: entry
+    aphorism: "买横买坑"
+    note: "平台/小涨标的的开盘低开下限。低开过多说明承接坏了。"
+
+  entry.gap_max:
+    value: 0.020
+    unit: pct
+    range: [0.0, 0.04]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: entry
+    aphorism: "不买竖"
+    note: "平台/小涨标的的开盘高开上限。高开超过此值就不追。"
+
+  entry.pit_gap_min:
+    value: -0.035
+    unit: pct
+    range: [-0.06, -0.01]
+    step: 0.005
+    tunable: false
+    sensitivity: high
+    group: entry
+    aphorism: "买坑"
+    note: "坑反转标的允许更深的低开，但仍有限度。"
+
+  entry.max_chase:
+    value: 0.040
+    unit: pct
+    range: [0.02, 0.08]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: entry
+    aphorism: "不买竖"
+    note: "硬性追高上限；任何标的高开超过此值都不买。"
+
+  entry.stop_loss:
+    value: 0.07
+    unit: pct
+    range: [0.04, 0.12]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: entry
+    aphorism: "急跌放量立马撤"
+    note: "单笔硬止损。用‘信号日收盘价’计算，次日开盘触发则按开盘价成交。"
+
+  entry.min_stop_pct:
+    value: 0.03
+    unit: pct
+    range: [0.015, 0.05]
+    step: 0.005
+    tunable: false
+    sensitivity: high
+    group: entry
+    aphorism: "买横买坑"
+    note: "最小止损距离。支撑位太近时把止损放到 3% 以下，避免被日内噪声扫掉。"
+
+  entry.size_mult_platform:
+    value: 0.90
+    unit: x
+    range: [0.4, 1.2]
+    step: 0.05
+    tunable: false
+    sensitivity: high
+    group: entry
+    aphorism: "买横"
+    note: "纯平台突破/箱体建仓的风险预算倍数。"
+
+  entry.size_mult_pit:
+    value: 1.00
+    unit: x
+    range: [0.5, 1.3]
+    step: 0.05
+    tunable: false
+    sensitivity: high
+    group: entry
+    aphorism: "买坑"
+    note: "普通坑反转的风险预算倍数。"
+
+  entry.size_mult_deep_pit:
+    value: 1.25
+    unit: x
+    range: [1.0, 1.6]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: entry
+    aphorism: "不挖深坑不大买"
+    note: "深坑 + 趋势未坏时的风险预算倍数。没有深坑不允许用这个倍数。"
+
+  entry.size_mult_cold_deep_pit:
+    value: 0.50
+    unit: x
+    range: [0.25, 0.8]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: entry
+    aphorism: "不挖深坑不大买"
+    note: "冰点期深坑例外的风险预算倍数。只有 COLD + 深坑 + 趋势未坏才用；默认半风险。"
+
+  entry.size_mult_small_rise:
+    value: 0.80
+    unit: x
+    range: [0.4, 1.2]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: entry
+    aphorism: "连续小涨要大涨"
+    note: "纯小涨启动的风险预算倍数。小涨是启动信号，但确认度低于深坑。"
+
+  entry.size_mult_platform_small_rise:
+    value: 1.00
+    unit: x
+    range: [0.6, 1.3]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: entry
+    aphorism: "买横 + 连续小涨"
+    note: "横盘缩量后又出现连续小涨，两个信号叠加，允许比纯平台更高。"
+
+# =============================================================================
+# 五、持有：正常 / 洗盘 / 加速 / 走坏
+# =============================================================================
+  holding.ma_trail:
+    value: 10
+    unit: day
+    range: [5, 20]
+    step: 1
+    tunable: false
+    sensitivity: high
+    group: holding
+    aphorism: "连续小涨要大涨"
+    note: "移动止盈均线。盈利后跌破 MA10 离场。"
+
+  holding.ma_trend:
+    value: 20
+    unit: day
+    range: [10, 30]
+    step: 1
+    tunable: false
+    sensitivity: high
+    group: holding
+    aphorism: "急跌无量是洗盘"
+    note: "中期趋势线。跌破 MA20 连续 N 日视为走坏。"
+
+  holding.ma_long:
+    value: 60
+    unit: day
+    range: [40, 120]
+    step: 5
+    tunable: false
+    sensitivity: high
+    group: holding
+    aphorism: "不挖深坑不大买"
+    note: "长期趋势线。无量急跌只要还在 MA60 上方且 MA60 上翘，就不恐慌。"
+
+  holding.washout_drop:
+    value: 0.03
+    unit: pct
+    range: [0.015, 0.06]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: holding
+    aphorism: "急跌无量是洗盘"
+    note: "持仓单日跌幅达到此值，才进入‘洗盘 or 放量撤退’的判断。"
+
+  holding.washout_vol:
+    value: 0.70
+    unit: x
+    range: [0.4, 1.0]
+    step: 0.05
+    tunable: true
+    sensitivity: high
+    group: holding
+    aphorism: "急跌无量是洗盘"
+    note: "持仓急跌且量比低于此值，视为无量洗盘，不触发放量撤退。"
+
+  holding.climax_big_up:
+    value: 0.04
+    unit: pct
+    range: [0.03, 0.07]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: holding
+    aphorism: "连续大涨要离场"
+    note: "大阳线定义：单日涨幅达到此值。"
+
+  holding.climax_big_up_days:
+    value: 3
+    unit: day
+    range: [2, 5]
+    step: 1
+    tunable: true
+    sensitivity: high
+    group: holding
+    aphorism: "连续大涨要离场"
+    note: "最近 N 日出现连续大阳线，触发减仓。"
+
+  holding.climax_ret5:
+    value: 0.15
+    unit: pct
+    range: [0.10, 0.25]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: holding
+    aphorism: "连续大涨要离场"
+    note: "5 日累计涨幅达到此值，触发减仓。"
+
+  holding.climax_ret5_all:
+    value: 0.22
+    unit: pct
+    range: [0.15, 0.40]
+    step: 0.01
+    tunable: false
+    sensitivity: high
+    group: holding
+    aphorism: "连续大涨要离场"
+    note: "5 日累计涨幅达到此值，直接清仓，不再只减半。"
+
+  holding.trail_start:
+    value: 0.10
+    unit: pct
+    range: [0.05, 0.20]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: holding
+    aphorism: "连续小涨要大涨"
+    note: "浮盈达到此值后，启动移动止盈。"
+
+  holding.trail_pct:
+    value: 0.08
+    unit: pct
+    range: [0.04, 0.15]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: holding
+    aphorism: "卖在人声鼎沸处"
+    note: "从持仓最高点回撤此比例，止盈离场。"
+
+  holding.time_stop_days:
+    value: 15
+    unit: day
+    range: [5, 40]
+    step: 1
+    tunable: true
+    sensitivity: medium
+    group: holding
+    aphorism: "买横买坑"
+    note: "时间止损：持有超过 N 日仍未达到最低收益，换仓。"
+
+  holding.time_stop_min_ret:
+    value: 0.03
+    unit: pct
+    range: [0.0, 0.08]
+    step: 0.01
+    tunable: false
+    sensitivity: medium
+    group: holding
+    aphorism: "买横买坑"
+    note: "时间止损的最低收益门槛。"
+
+  holding.below_ma_days:
+    value: 2
+    unit: day
+    range: [1, 5]
+    step: 1
+    tunable: true
+    sensitivity: high
+    group: holding
+    aphorism: "急跌放量立马撤"
+    note: "连续 N 日收盘低于 MA20，视为趋势走坏。"
+
+# =============================================================================
+# 六、卖出：人声鼎沸 / 连续大涨 / 冲高回落 / 放量急跌
+# =============================================================================
+  exit.volume_dump_pct:
+    value: 0.04
+    unit: pct
+    range: [0.02, 0.07]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: exit
+    aphorism: "急跌放量立马撤"
+    note: "持仓单日跌幅达到此值，且放量，立即清仓。"
+
+  exit.volume_dump_vol:
+    value: 1.50
+    unit: x
+    range: [1.1, 2.5]
+    step: 0.1
+    tunable: true
+    sensitivity: high
+    group: exit
+    aphorism: "急跌放量立马撤"
+    note: "放量撤退的量比阈值。"
+
+  exit.failed_spike_high:
+    value: 0.05
+    unit: pct
+    range: [0.03, 0.08]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: exit
+    aphorism: "快速冲高要回落"
+    note: "日内最高价相对昨收的涨幅，达到此值才考虑‘冲高’。"
+
+  exit.failed_spike_close:
+    value: 0.01
+    unit: pct
+    range: [0.0, 0.03]
+    step: 0.005
+    tunable: false
+    sensitivity: high
+    group: exit
+    aphorism: "快速冲高要回落"
+    note: "冲高后收盘仍低于昨收的此涨幅，视为冲高失败。日线代理，非分时。"
+
+  exit.upper_shadow:
+    value: 0.03
+    unit: pct
+    range: [0.015, 0.06]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: exit
+    aphorism: "快速冲高要回落"
+    note: "上影线长度（高-实体上沿）/昨收，超过此值视为抛压。"
+
+  exit.failed_spike_vol:
+    value: 1.50
+    unit: x
+    range: [1.0, 2.5]
+    step: 0.1
+    tunable: true
+    sensitivity: high
+    group: exit
+    aphorism: "快速冲高要回落"
+    note: "冲高回落确认所需的量比。"
+
+  exit.partial_frac:
+    value: 0.50
+    unit: frac
+    range: [0.2, 0.8]
+    step: 0.1
+    tunable: false
+    sensitivity: medium
+    group: exit
+    aphorism: "连续大涨要离场"
+    note: "减仓比例。默认卖一半，保留一半让趋势继续跑。"
+
+# =============================================================================
+# 七、组合：槽位、风险预算、熔断
+# =============================================================================
+  portfolio.initial_capital:
+    value: 1000000.0
+    unit: yuan
+    range: [100000.0, 100000000.0]
+    step: 100000.0
+    tunable: false
+    sensitivity: low
+    group: portfolio
+    aphorism: "组合"
+    note: "模拟盘初始资金。"
+
+  portfolio.slots:
+    value: 4
+    unit: count
+    range: [2, 8]
+    step: 1
+    tunable: true
+    sensitivity: high
+    group: portfolio
+    aphorism: "组合"
+    note: "最大同时持仓数。常规波段比打板更适合 4-5 槽位。"
+
+  portfolio.cold_max_positions:
+    value: 1
+    unit: count
+    range: [1, 2]
+    step: 1
+    tunable: true
+    sensitivity: high
+    group: portfolio
+    aphorism: "不挖深坑不大买"
+    note: "冰点深坑例外下，账户最多同时持有几只。默认 1 只，且总仓位仍受 cap_cold=20% 限制。"
+
+  portfolio.max_weight:
+    value: 0.28
+    unit: weight
+    range: [0.15, 0.40]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: portfolio
+    aphorism: "组合"
+    note: "单票权重上限。"
+
+  portfolio.risk_per_trade:
+    value: 0.0125
+    unit: pct
+    range: [0.005, 0.025]
+    step: 0.0025
+    tunable: true
+    sensitivity: high
+    group: portfolio
+    aphorism: "组合"
+    note: "单笔风险预算（占净值）。仓位由‘风险预算 ÷ 止损距离’反解。"
+
+  portfolio.max_portfolio_heat:
+    value: 0.050
+    unit: pct
+    range: [0.02, 0.10]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: portfolio
+    aphorism: "组合"
+    note: "全部持仓的未触发止损风险之和上限。"
+
+  portfolio.theme_cap:
+    value: 2
+    unit: count
+    range: [1, 4]
+    step: 1
+    tunable: false
+    sensitivity: medium
+    group: portfolio
+    aphorism: "组合"
+    note: "同行业最多持仓数。数据源无行业时退化为不限制。"
+
+  portfolio.daily_loss:
+    value: 0.03
+    unit: pct
+    range: [0.01, 0.06]
+    step: 0.005
+    tunable: true
+    sensitivity: high
+    group: portfolio
+    aphorism: "急跌放量立马撤"
+    note: "单日亏损达到此值，次日禁止开新仓。"
+
+  portfolio.dd_halve:
+    value: 0.08
+    unit: pct
+    range: [0.04, 0.15]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: portfolio
+    aphorism: "组合"
+    note: "净值回撤达到此值，总仓位上限减半。"
+
+  portfolio.dd_stop:
+    value: 0.12
+    unit: pct
+    range: [0.08, 0.25]
+    step: 0.01
+    tunable: true
+    sensitivity: high
+    group: portfolio
+    aphorism: "组合"
+    note: "净值回撤达到此值，强制停止开仓。"
+
+  portfolio.stop_days:
+    value: 5
+    unit: day
+    range: [3, 20]
+    step: 1
+    tunable: false
+    sensitivity: medium
+    group: portfolio
+    aphorism: "组合"
+    note: "强制停止开仓的天数。"
+
+  portfolio.commission_rate:
+    value: 0.00025
+    unit: pct
+    range: [0.0, 0.001]
+    step: 0.00005
+    tunable: false
+    sensitivity: low
+    group: cost
+    aphorism: "成本"
+    note: "佣金，双边。"
+
+  portfolio.commission_min:
+    value: 5.0
+    unit: yuan
+    range: [0.0, 20.0]
+    step: 1.0
+    tunable: false
+    sensitivity: low
+    group: cost
+    aphorism: "成本"
+    note: "单笔最低佣金。"
+
+  portfolio.stamp_tax:
+    value: 0.0005
+    unit: pct
+    range: [0.0, 0.002]
+    step: 0.0001
+    tunable: false
+    sensitivity: low
+    group: cost
+    aphorism: "成本"
+    note: "印花税，仅卖出。"
+
+  portfolio.transfer_fee:
+    value: 0.00001
+    unit: pct
+    range: [0.0, 0.0001]
+    step: 0.00001
+    tunable: false
+    sensitivity: low
+    group: cost
+    aphorism: "成本"
+    note: "过户费，双边。"
+
+  portfolio.slippage:
+    value: 0.0010
+    unit: pct
+    range: [0.0, 0.005]
+    step: 0.0005
+    tunable: true
+    sensitivity: high
+    group: cost
+    aphorism: "成本"
+    note: "单边滑点。比选股更影响长期净值，不要为了好看设 0。"
+
+# =============================================================================
+# 运行时（不属于策略调参；部署时按机器改）
+# =============================================================================
+runtime:
+  data:
+    cache_dir: "cache"
+    history_days: 180
+    index_history_days: 260
+    fetch_workers: 4
+    spot_cache_minutes: 60
+  push:
+    enabled: true
+    premarket_heartbeat: true
+    close_always: true
+    title_prefix: "常规量价模拟盘"
+    timeout_sec: 10
+    tokens: []
+  execution:
+    mode: "next_open"
+    t_plus_one: true
+    limit_down_unsellable: true
+  review:
+    enabled: true
+    # 每 5 次“收盘推送”做一次复盘；09:15 盘前心跳不计入，避免 2.5 天就复盘一次
+    every_n_close_pushes: 5
+    # 少于 30 笔已平仓样本时，只记录、不调参
+    min_trades_for_param_change: 30

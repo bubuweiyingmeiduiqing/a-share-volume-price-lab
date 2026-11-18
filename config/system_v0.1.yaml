@@ -1,0 +1,209 @@
+# =============================================================================
+# 涨停强势股短线系统 v0.1 —— 参数表
+# 对应文档：docs/01_系统设计_v0.1.md §13
+# 约定：
+#   tunable: true  表示允许在参数治理流程内调整（共 22 个）
+#   tunable: false 表示冻结为约定值，不得随意修改
+# =============================================================================
+
+meta:
+  version: "0.1"
+  updated: "2026-11-03"
+  tunable_count: 22
+  frozen_count: 15
+
+# ---------------------------------------------------------------- L0 制度层
+l0_instruments:
+  limit_ratio:
+    main_board: 0.10        # 60/00 开头
+    chinext: 0.20           # 30 开头，2020-08-24 起
+    star: 0.20              # 688 开头
+    bse: 0.30               # 8/4 开头
+    st: 0.05
+  exclude:
+    st: true
+    ipo_days_min: 60        # 上市不足 60 个交易日剔除
+    suspended: true
+    bse: true
+    limit_down_sealed: true # 跌停封死不作为候选
+    price_below: 1.0        # 面值风险
+  t_plus_one: true
+  limit_down_unsellable: true
+
+# ---------------------------------------------------------------- L1 状态层
+l1_regime:
+  e_score:
+    method: rolling_percentile
+    window: 252
+    weights: equal          # 七因子等权，不调权重（tunable: false）
+    factors:
+      - limit_up_count
+      - promotion_rate      # 连板晋级率（昨日涨停今日仍涨停）
+      - seal_success_rate   # 1 - 炸板率
+      - max_board_height
+      - breadth             # log(上涨家数/下跌家数)
+      - volume_ratio        # 全市场成交额/20日均值
+      - prev_limitup_return # 昨日涨停股今日平均涨幅
+  thresholds:
+    ice: 22                 # tunable
+    repair: 50              # tunable
+    expand: 65              # tunable
+  hysteresis: 5             # frozen
+  min_dwell_days: 2         # frozen
+  state_caps:
+    ICE: 0.20
+    REPAIR: 0.50
+    EXPAND: 1.00
+    DIVERGE: 0.50
+    FADE: 0.00
+  state_engines:
+    ICE: [E2]
+    REPAIR: [E2, E3]
+    EXPAND: [E1, E3]
+    DIVERGE: [E2]
+    FADE: []
+
+# ---------------------------------------------------------------- L2 方向层
+l2_theme:
+  heat_window: 10           # frozen
+  main_line_pctile: 0.70    # tunable
+  new_theme_burst: 8        # tunable，单日涨停家数
+  max_alive_in_faded: 1     # frozen，退潮题材保留活口数
+
+# ---------------------------------------------------------------- L3 标的层
+l3_selection:
+  strong_pool_lookback: 20  # frozen，近 N 日有涨停
+  identity_weights:         # frozen
+    board_count: 0.40
+    seal_earliness: 0.25
+    seal_amount_ratio: 0.20
+    turnover: 0.15
+  buyable_ranks: [1, 2]     # frozen，只买龙头/龙二
+  low_price_threshold: 10.0 # tunable，E3 低价
+  low_position_pctile: 0.60 # tunable，E3 低位
+  high_switch:
+    max_board_trigger: 6    # frozen，最高板 >= 6 触发高低切
+    forbid_middle: true     # frozen，禁买中间身位
+
+# ---------------------------------------------------------------- L4 触发层
+l4_engines:
+  E1:                       # 接力 / 打板
+    states: [EXPAND]
+    universe:
+      board_count_min: 2
+      identity_rank_max: 2
+    trigger_strong:
+      gap_min: 0.03         # tunable
+      auction_vol_ratio: 1.2 # tunable
+    trigger_weak:
+      gap_range: [-0.05, 0.0] # tunable(left)
+      reversal_window_min: 30 # frozen
+    veto:
+      gap_min: 0.05         # tunable
+      auction_vol_ratio_max: 0.8 # tunable
+    fill_gate:
+      forbid_yizi: true
+      forbid_instant_seal: true   # 9:35 前封板且未开板
+      allowed: [huanshou_board, reseal_after_break, next_auction]
+    risk:
+      tp: 0.08              # tunable
+      sl: 0.05              # tunable
+      max_hold: 3           # frozen
+    max_weight: 0.333
+  E2:                       # 低吸
+    states: [ICE, REPAIR, DIVERGE]
+    universe:
+      had_limit_up_within: 10
+      board_count_prev_min: 2
+      yesterday_state: [zhaban, big_bear]  # 炸板 或 跌幅 <= -3%
+    trigger:
+      gap_max: -0.03        # tunable
+      gap_floor: -0.07      # tunable，低于则视为趋势走坏
+      confirm_window_min: 30      # frozen
+      require_above_vwap: true    # frozen
+    requires_intraday_data: true  # 无分时数据则本引擎停用
+    risk:
+      tp: 0.05              # tunable
+      sl: 0.04              # tunable
+      max_hold: 2           # frozen
+    max_weight: 0.20
+  E3:                       # 首板 / 补涨
+    states: [REPAIR, EXPAND]
+    universe:
+      board_count_prev: 1
+    trigger:
+      gap_range: [0.02, 0.06]  # tunable(low edge)
+      auction_vol_ratio: 1.2   # frozen
+      seal_before: "14:00"     # frozen
+    risk:
+      tp: 0.06              # tunable
+      sl: 0.04              # tunable
+      max_hold: 2           # frozen
+    max_weight: 0.25
+
+  # 引擎互斥：每个状态只允许选定引擎开新仓（见 l1_regime.state_engines）
+  exclusive: true
+
+# ---------------------------------------------------------------- L5 持仓层
+l5_holding:
+  weak:
+    zhaban: true
+    below_ma: 5             # frozen
+    bearish_and_below_vwap: true
+  accel:
+    vol_ratio_max: 0.80     # tunable
+    turnover_decline_days: 3 # frozen
+    seal_before: "09:45"    # frozen
+  turnover_high_pctile: 0.70 # tunable
+
+# ---------------------------------------------------------------- L6 退出层
+l6_exit:
+  priority: [hard_stop, weak_exit, state_tp, time_tp]  # frozen，硬止损最高
+  divergent: fixed_tp_sl
+  accel:
+    gap_sell_half: 0.05     # frozen
+    trail: close_below_prev_close_or_ma5
+    no_fixed_tp: true
+  weak: exit_immediately
+  pending_exit_on_limit_down: true
+
+# ---------------------------------------------------------------- L7 组合层
+l7_portfolio:
+  slots: 3                  # 基准值；按 L8 实测胜率可在 3–5 之间切换
+  weight_cap: 0.333         # frozen（由 L8 实测胜率反解）
+  theme_cap: 2              # tunable
+  risk_budget_per_trade: 0.0167  # = 0.333 × 0.05
+  circuit_breaker:
+    daily_loss: -0.03       # tunable
+    drawdown_halve: 0.08
+    drawdown_stop: 0.12
+    stop_days: 5
+  turnover_budget:
+    max_trades_per_year: 100    # 由成本预算反解（见可行性报告 F5）
+    cost_per_trade: 0.003
+
+# ---------------------------------------------------------------- L8 分析层
+l8_analysis:
+  ledger_fields:
+    - date
+    - code
+    - engine
+    - entry_regime
+    - theme
+    - entry_type
+    - signal_price
+    - fill_price
+    - fill_prob_expected
+    - fill_prob_realized
+    - hold_state_path
+    - exit_reason
+    - hold_days
+    - net_pnl
+    - portfolio_contribution
+  monitoring:
+    rolling_window: 60
+    confidence: 0.95        # Wilson 下界
+    min_samples_per_cell: 20
+  governance:
+    max_param_changes_per_quarter: 1
+    forbid_tuning_in_drawdown: true

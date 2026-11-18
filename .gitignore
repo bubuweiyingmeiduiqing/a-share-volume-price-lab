@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+.localized
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Runtime state and generated artifacts (never commit account/cache/logs)
+deploy/regular_paper/state/
+deploy/regular_paper/cache/
+deploy/regular_paper/logs/
+deploy/regular_paper/reports/
+deploy/regular_paper/demo/
+deploy/daban_paper/state/
+deploy/daban_paper/cache/
+deploy/daban_paper/logs/
+deploy/daban_paper/reports/
+*.pkl
+*.tmp
+
+# Local course notes / third-party material (kept out of the repo)
+z 说交易/
