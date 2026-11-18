@@ -1,5 +1,9 @@
 # 涨停强势股短线系统 · 设计与可行性验证 v0.1
 
+> **部署纪律：VPS 上运行的代码必须来源于 Git 仓库的某个 commit。**
+> 统一用 [`deploy/deploy_vps.sh`](deploy/deploy_vps.sh) 部署，禁止 SSH 直接改 VPS 文件；
+> `status.py` / `watchdog.py` 会校验运行代码与部署清单是否一致。详见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
+
 把岑若曦《短线的最高境界是不停的追逐涨停》里的 22 条经验法则，拼装成一条**可执行、无内部矛盾**的决策链，
 并在**不跑回测、不查行情数据**的前提下，先判断它是否值得去回测。
 
