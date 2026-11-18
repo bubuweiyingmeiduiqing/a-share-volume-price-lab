@@ -191,6 +191,9 @@ python3 replan.py --date 20261112
 
 ## 参数怎么改
 
+> **参数也走仓库。** 改本地 `config/regular_v1.yaml` → commit/push → `deploy_vps.sh`。
+> 直接在 VPS 改 YAML 会被 `state/deploy_manifest.json` 标成 `code_drift`。
+
 1. 先读 [`docs/04_常规版_参数手册.md`](../../docs/04_常规版_参数手册.md) 的 §0 和 §2。
 2. 只改“第一线参数”，一次一个；`tunable: false` 不要动。
 3. 改完跑：

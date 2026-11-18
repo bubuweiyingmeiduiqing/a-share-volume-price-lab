@@ -28,6 +28,9 @@
 state/  cache/  logs/  reports/  demo/  config/（部署时只更新 YAML/CHANGELOG）
 ```
 
+> **参数/配置也属于部署清单。** 改 `config/regular_v1.yaml` 同样要
+> 本地 commit → push → `deploy_vps.sh`；直接在 VPS 改 YAML 会被标成 `code_drift`。
+
 ---
 
 ## 2. 标准流程
