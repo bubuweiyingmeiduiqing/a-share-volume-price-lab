@@ -451,7 +451,284 @@ def _index_file(symbol: str) -> Path:
     return INDEX_DIR / f"{symbol}.pkl"
 
 
-def index_daily(symbol: str, end: str, need: int = 260) -> pd.DataFrame:
+# 指数行情：东财/新浪/腾讯的日线接口在 16:20 前后经常断连或只给到昨天，
+# 所以除了多源降级，还在收盘后用实时行情补出当日 K 线（见 _fill_index_today）。
+# 口径约定：volume 单位手；amount 列沿用缓存口径（成交量手数），regime 只比比值。
+_EM_UT = "fa5fd1943c7b386f172d6893dbfba10b"
+_INDEX_SH_PREFIX = ("000", "880", "999")
+
+
+def _index_code(symbol: str) -> str:
+    s = str(symbol).strip().lower()
+    for pre in ("sh", "sz", "bj"):
+        if s.startswith(pre):
+            s = s[len(pre):]
+            break
+    return s.zfill(6)
+
+
+def _index_prefix(symbol: str) -> str:
+    return "sh" if _index_code(symbol).startswith(_INDEX_SH_PREFIX) else "sz"
+
+
+def _index_secid(symbol: str) -> str:
+    """东财 secid：1=沪市，0=深市。"""
+    return f"{'1' if _index_prefix(symbol) == 'sh' else '0'}.{_index_code(symbol)}"
+
+
+def _http_text(url: str, referer: str, timeout: float = 10.0) -> str:
+    """轻量 HTTP 文本读取。行情接口不带 Referer 会被拒（新浪直接返回空串）。"""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": referer,
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("gbk", "ignore")
+
+
+def _index_closed(clock: str | None) -> bool:
+    """行情时间是否已收盘（>=15:00）。盘中拿到的是现价，不能当收盘价存。"""
+    m = re.match(r"^(\d{1,2}):(\d{2})", str(clock or ""))
+    if not m:
+        return False
+    return int(m.group(1)) * 60 + int(m.group(2)) >= 15 * 60
+
+
+def _sina_quote_volume(volume: float, amount: float) -> float:
+    """
+    新浪指数的成交量单位不统一：沪市指数报“手”，深市指数报“股”。
+    每手 100 股，所以「成交额/成交量 > 100 元」就是手，否则按股折成手。
+    """
+    if volume <= 0:
+        return 0.0
+    if amount > 0 and amount / volume < 100:
+        return volume / 100.0
+    return volume
+
+
+def _sina_index_quote(symbol: str) -> dict | None:
+    sym = f"{_index_prefix(symbol)}{_index_code(symbol)}"
+    text = _http_text(f"https://hq.sinajs.cn/list={sym}", "https://finance.sina.com.cn")
+    for line in text.splitlines():
+        if '="' not in line:
+            continue
+        f = line.split('="', 1)[1].rsplit('"', 1)[0].split(",")
+        if len(f) < 32:
+            continue
+        try:
+            op, prev, close, high, low = (float(f[1]), float(f[2]), float(f[3]),
+                                          float(f[4]), float(f[5]))
+            volume = _sina_quote_volume(float(f[8]), float(f[9]))
+        except (TypeError, ValueError):
+            continue
+        return {"date": norm_date(f[30]), "clock": f[31], "open": op, "prev_close": prev,
+                "close": close, "high": high, "low": low, "volume": volume,
+                "source": "sina"}
+
+
+def _em_index_quote(symbol: str) -> dict | None:
+    url = ("https://push2.eastmoney.com/api/qt/stock/get?"
+           f"secid={_index_secid(symbol)}&ut={_EM_UT}"
+           "&fields=f43,f44,f45,f46,f47,f48,f59,f60,f86")
+    data = json.loads(_http_text(url, "https://quote.eastmoney.com/"))
+    q = data.get("data") or {}
+    if not q.get("f43"):
+        return None
+    scale = float(10 ** int(q.get("f59") or 2))
+
+    def px(key: str) -> float:
+        v = q.get(key)
+        return float(v) / scale if isinstance(v, (int, float)) else 0.0
+
+    # f86 是行情时间戳，固定按北京时间换算，避免服务器时区影响“今天”是哪天。
+    when = (dt.datetime.fromtimestamp(int(q.get("f86") or 0), dt.timezone.utc)
+            + dt.timedelta(hours=8))
+    return {"date": when.strftime("%Y%m%d"), "clock": when.strftime("%H:%M"),
+            "open": px("f46"), "prev_close": px("f60"), "close": px("f43"),
+            "high": px("f44"), "low": px("f45"),
+            "volume": float(q.get("f47") or 0), "source": "eastmoney"}
+
+
+def _tx_index_quote(symbol: str) -> dict | None:
+    sym = f"{_index_prefix(symbol)}{_index_code(symbol)}"
+    text = _http_text(f"https://qt.gtimg.cn/q={sym}", "https://finance.qq.com")
+    for line in text.splitlines():
+        if '="' not in line:
+            continue
+        f = line.split('="', 1)[1].rsplit('"', 1)[0].split("~")
+        if len(f) < 37:
+            continue
+        try:
+            close, prev, op = float(f[3]), float(f[4]), float(f[5])
+            volume = float(f[6])                    # 手
+            high, low = float(f[33]), float(f[34])
+        except (TypeError, ValueError):
+            continue
+        stamp = str(f[30])
+        return {"date": norm_date(stamp), "clock": f"{stamp[8:10]}:{stamp[10:12]}",
+                "open": op, "prev_close": prev, "close": close, "high": high,
+                "low": low, "volume": volume, "source": "tencent"}
+
+
+# 腾讯行情成交量固定是“手”，口径最干净，放第一个；新浪次之（单位要按成交额反推）；
+# 东财最容易断连，放最后。
+_INDEX_QUOTE_SOURCES = (_tx_index_quote, _sina_index_quote, _em_index_quote)
+
+
+def _index_quote_bar(symbol: str, date: str) -> dict | None:
+    """收盘后用实时行情拼出 date 当天的指数 K 线；日期对不上或数据不合法就返回 None。"""
+    date = norm_date(date)
+    for fn in _INDEX_QUOTE_SOURCES:
+        name = fn.__name__.strip("_").replace("_index_quote", "")
+        try:
+            q = fn(symbol)
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 指数实时行情（{name}）失败：{e}")
+            continue
+        if not q:
+            continue
+        if norm_date(q.get("date") or "") != date:
+            print(f"[warn] 指数实时行情（{name}）是 {q.get('date')}，不是 {dash(date)}")
+            continue
+        if not _index_closed(q.get("clock")):
+            print(f"[warn] 指数实时行情（{name}）还没收盘（{q.get('clock')}），不用现价冒充收盘")
+            continue
+        try:
+            o, h, l, c = (float(q["open"]), float(q["high"]),
+                          float(q["low"]), float(q["close"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if min(o, h, l, c) <= 0 or h < max(o, c) or l > min(o, c):
+            print(f"[warn] 指数实时行情（{name}）价格异常：开{o} 高{h} 低{l} 收{c}")
+            continue
+        prev = float(q.get("prev_close") or 0)
+        vol = max(0.0, float(q.get("volume") or 0))
+        return {
+            "date": date, "open": o, "high": h, "low": l, "close": c,
+            "volume": vol,
+            # 与指数缓存同口径：amount 列存成交量(手)，不是成交额(元)。
+            "amount": vol,
+            "pct": (c / prev - 1) * 100 if prev > 0 else 0.0,
+            "turnover": 0.0,
+            "source": q.get("source", name),
+        }
+    return None
+
+
+def _sina_index_klines(symbol: str, need: int) -> pd.DataFrame:
+    """新浪历史 K 线 JSON：一次请求、不需要 JS 解密；不带成交额，amount 用成交量占位。"""
+    sym = f"{_index_prefix(symbol)}{_index_code(symbol)}"
+    n = max(120, min(int(need) + 40, 1023))
+    url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+           f"CN_MarketData.getKLineData?symbol={sym}&scale=240&ma=no&datalen={n}")
+    rows = json.loads(_http_text(url, "https://finance.sina.com.cn"))
+    if not rows:
+        return pd.DataFrame()
+    vol = pd.to_numeric([r.get("volume") for r in rows], errors="coerce") / 100.0
+    out = pd.DataFrame({
+        "date": [norm_date(r.get("day", "")) for r in rows],
+        "open": pd.to_numeric([r.get("open") for r in rows], errors="coerce"),
+        "close": pd.to_numeric([r.get("close") for r in rows], errors="coerce"),
+        "high": pd.to_numeric([r.get("high") for r in rows], errors="coerce"),
+        "low": pd.to_numeric([r.get("low") for r in rows], errors="coerce"),
+        "volume": vol, "amount": vol,
+    })
+    out = out.dropna(subset=["close"]).sort_values("date").reset_index(drop=True)
+    out["pct"] = out["close"].pct_change().fillna(0.0) * 100
+    out["turnover"] = 0.0
+    return out
+
+
+def _index_hist(symbol: str, end: str, need: int) -> pd.DataFrame:
+    """指数日线多源抓取：东财 → 新浪 → 腾讯，取第一个响应的源。"""
+    import akshare as ak
+    start = (dt.date.today() - dt.timedelta(days=need * 2 + 120)).strftime("%Y%m%d")
+    code = _index_code(symbol)
+    sym = f"{_index_prefix(symbol)}{code}"
+
+    def em_hist() -> pd.DataFrame:
+        raw = _retry(ak.index_zh_a_hist, symbol=code, period="daily",
+                     start_date=start, end_date=end)
+        return _normalize_hist(raw)
+
+    def em_kline() -> pd.DataFrame:
+        raw = _retry(ak.stock_zh_index_daily_em, symbol=sym)
+        raw = raw.rename(columns={"date": "日期", "open": "开盘", "close": "收盘",
+                                  "high": "最高", "low": "最低",
+                                  "volume": "成交量", "amount": "成交额"})
+        if "涨跌幅" not in raw.columns:
+            raw["涨跌幅"] = raw["收盘"].pct_change() * 100
+        if "换手率" not in raw.columns:
+            raw["换手率"] = 0.0
+        if "成交额" not in raw.columns:
+            raw["成交额"] = raw["成交量"] * raw["收盘"]
+        return _normalize_hist(raw)
+
+    def sina_kline() -> pd.DataFrame:
+        return _sina_index_klines(symbol, need)
+
+    def tx_hist() -> pd.DataFrame:
+        raw = _retry(ak.stock_zh_index_daily_tx, symbol=sym)
+        raw = raw.rename(columns={"date": "日期", "open": "开盘", "close": "收盘",
+                                  "high": "最高", "low": "最低", "amount": "成交额"})
+        raw["成交量"] = 0.0
+        raw["涨跌幅"] = raw["收盘"].pct_change() * 100
+        raw["换手率"] = 0.0
+        return _normalize_hist(raw)
+
+    for name, fn in (("东财日线", em_hist), ("东财K线", em_kline),
+                     ("新浪K线", sina_kline), ("腾讯日线", tx_hist)):
+        try:
+            df = fn()
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 指数 {symbol} 日线源「{name}」失败：{e}")
+            continue
+        if df is None or df.empty:
+            print(f"[warn] 指数 {symbol} 日线源「{name}」返回空")
+            continue
+        print(f"[info] 指数 {symbol} 日线源「{name}」返回 {len(df)} 根，"
+              f"最后 {df['date'].iloc[-1]}")
+        return df
+    return pd.DataFrame()
+
+
+def _fill_index_today(df: pd.DataFrame, symbol: str, date: str) -> pd.DataFrame:
+    """
+    日线源还没给到 date 的 K 线时，用收盘后的实时行情补一根当日 K 线。
+
+    只允许补“上一行就是上一交易日”的缺口，避免把多日缺口填成假 K 线；
+    补出来的行与缓存同口径，并随缓存一起落盘，后续复盘 / 重跑不用再拉。
+    """
+    date = norm_date(date)
+    if df is None or df.empty or str(df["date"].iloc[-1]) >= date:
+        return df
+    last = str(df["date"].iloc[-1])
+    try:
+        prev = prev_trade_date(date)
+    except Exception:  # noqa: BLE001
+        prev = None
+    if not prev or last != prev:
+        print(f"[warn] 指数日线停在 {dash(last)}，与上一交易日 {prev or '未知'} 不连续，"
+              f"不补实时 K 线")
+        return df
+    bar = _index_quote_bar(symbol, date)
+    if bar is None:
+        print(f"[warn] 指数 {symbol} 实时行情也没拿到 {dash(date)}，当日收盘价缺失")
+        return df
+    print(f"[info] 指数日线停在 {dash(last)}，用 {bar['source']} 实时行情补 {dash(date)}："
+          f"收 {bar['close']:.2f}（{bar['pct']:+.2f}%）")
+    cols = ("date", "open", "high", "low", "close",
+            "volume", "amount", "pct", "turnover")
+    return pd.concat([df, pd.DataFrame([{k: bar[k] for k in cols}])],
+                     ignore_index=True)
+
+
+def index_daily(symbol: str, end: str, need: int = 260,
+                allow_realtime: bool = True) -> pd.DataFrame:
     end = norm_date(end)
     p = _index_file(symbol)
     cached: pd.DataFrame | None = None
@@ -466,57 +743,24 @@ def index_daily(symbol: str, end: str, need: int = 260) -> pd.DataFrame:
     if cached is not None and len(cached) >= need and str(cached["date"].iloc[-1]) >= end:
         return cached.tail(need).reset_index(drop=True)
 
-    import akshare as ak
-    start = (dt.date.today() - dt.timedelta(days=need * 2 + 120)).strftime("%Y%m%d")
-    fresh = pd.DataFrame()
-    try:
-        raw = _retry(ak.index_zh_a_hist, symbol=symbol, period="daily",
-                     start_date=start, end_date=end)
-        fresh = _normalize_hist(raw)
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] index_zh_a_hist({symbol}) 失败: {e}，尝试新浪/腾讯接口")
-        try:
-            prefix = "sh" if symbol.startswith(("000", "880", "999")) else "sz"
-            raw = _retry(ak.stock_zh_index_daily_em, symbol=f"{prefix}{symbol}")
-            raw = raw.rename(columns={"date": "日期", "open": "开盘", "close": "收盘",
-                                      "high": "最高", "low": "最低",
-                                      "volume": "成交量", "amount": "成交额"})
-            if "涨跌幅" not in raw.columns:
-                raw["涨跌幅"] = raw["收盘"].pct_change() * 100
-            if "换手率" not in raw.columns:
-                raw["换手率"] = 0.0
-            if "成交额" not in raw.columns:
-                raw["成交额"] = raw["成交量"] * raw["收盘"]
-            fresh = _normalize_hist(raw)
-        except Exception as e2:  # noqa: BLE001
-            print(f"[warn] 新浪指数失败: {e2}，尝试腾讯接口")
-            try:
-                prefix = "sh" if symbol.startswith(("000", "880", "999")) else "sz"
-                raw = _retry(ak.stock_zh_index_daily_tx, symbol=f"{prefix}{symbol}")
-                raw = raw.rename(columns={"date": "日期", "open": "开盘", "close": "收盘",
-                                          "high": "最高", "low": "最低",
-                                          "amount": "成交额"})
-                raw["成交量"] = 0.0
-                raw["涨跌幅"] = raw["收盘"].pct_change() * 100
-                raw["换手率"] = 0.0
-                fresh = _normalize_hist(raw)
-            except Exception as e3:  # noqa: BLE001
-                if cached is not None and len(cached):
-                    print(f"[warn] 指数接口均失败，使用缓存：{e3}")
-                    return cached.tail(need).reset_index(drop=True)
-                raise DataError(f"无法获取指数 {symbol} 日线：{e3}") from e3
-
+    fresh = _index_hist(symbol, end, need)
     if fresh.empty:
-        if cached is not None and len(cached):
-            return cached.tail(need).reset_index(drop=True)
-        raise DataError(f"指数 {symbol} 返回空数据")
-
-    if cached is not None and len(cached):
+        if cached is None or not len(cached):
+            raise DataError(f"无法获取指数 {symbol} 日线（东财/新浪/腾讯均失败）")
+        print(f"[warn] 指数 {symbol} 日线接口全部失败，先用缓存"
+              f"（最后一天 {cached['date'].iloc[-1]}）")
+        merged = cached
+    elif cached is not None and len(cached):
         merged = pd.concat([cached, fresh], ignore_index=True)
         merged = merged.drop_duplicates(subset=["date"], keep="last").sort_values("date")
+        merged = merged.reset_index(drop=True)
     else:
-        merged = fresh.sort_values("date")
-    merged = merged.reset_index(drop=True)
+        merged = fresh.sort_values("date").reset_index(drop=True)
+
+    # 收盘后日线接口常常还停在昨天：用实时行情补一根当日 K 线，别让整轮收盘白跑。
+    if allow_realtime and str(merged["date"].iloc[-1]) < end:
+        merged = _fill_index_today(merged, symbol, end)
+
     try:
         with open(p, "wb") as f:
             pickle.dump(merged, f)
@@ -609,9 +853,13 @@ def load_market(date: str | None, params) -> MarketData:
     workers = max(1, int(params.rt("data", "fetch_workers", default=4)))
 
     print(f"[info] 拉取指数 {params.get('timing.index_symbol')} @ {dash(date)}")
-    idx = index_daily(str(params.get("timing.index_symbol")), date, index_need)
+    idx = index_daily(str(params.get("timing.index_symbol")), date, index_need,
+                      allow_realtime=bool(params.rt("data", "index_realtime_fill",
+                                                    default=True)))
     if idx.empty or str(idx["date"].iloc[-1]) != date:
-        raise DataError(f"指数日线未更新到 {date}（最后一天 {idx['date'].iloc[-1] if len(idx) else '无'}）")
+        got = idx["date"].iloc[-1] if len(idx) else "无"
+        raise DataError(f"指数日线未更新到 {date}（最后一天 {got}）；"
+                        f"东财/新浪/腾讯日线与实时行情均未拿到当日 K 线")
 
     print("[info] 拉取全市场快照…")
     rows = spot_snapshot(cache_min)

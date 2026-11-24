@@ -21,6 +21,8 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -438,6 +440,156 @@ class RegularPaperTest(unittest.TestCase):
             self.assertIn("今日复盘", report)
             self.assertIn("体检", report)
             self.assertTrue((state / "plan.json").exists())
+
+
+class IndexFallbackTest(unittest.TestCase):
+    """指数日线滞后 / 断连时的多源降级与实时行情补齐（全离线，不写生产缓存）。"""
+
+    @staticmethod
+    def _frame(dates: list[str]) -> pd.DataFrame:
+        n = len(dates)
+        return pd.DataFrame({
+            "date": dates,
+            "open": [3900.0] * n,
+            "high": [3950.0] * n,
+            "low": [3850.0] * n,
+            "close": [3900.0 + i for i in range(n)],
+            "volume": [1e8] * n,
+            "amount": [1e8] * n,
+            "pct": [0.0] * n,
+            "turnover": [0.0] * n,
+        })
+
+    @staticmethod
+    def _quote(**kw) -> dict:
+        base = {"date": "20261124", "clock": "15:35", "open": 4004.04,
+                "prev_close": 3958.29, "close": 3963.82, "high": 4011.69,
+                "low": 3957.92, "volume": 197381230.0, "source": "sina"}
+        base.update(kw)
+        return base
+
+    def test_clock_must_be_after_close(self):
+        self.assertTrue(dm._index_closed("15:00"))
+        self.assertTrue(dm._index_closed("15:35:39"))
+        self.assertFalse(dm._index_closed("14:59"))
+        self.assertFalse(dm._index_closed(""))
+        self.assertFalse(dm._index_closed(None))
+
+    def test_quote_bar_rejects_intraday_wrong_date_and_bad_ohlc(self):
+        for bad in (
+            self._quote(clock="10:30"),
+            self._quote(date="20261123"),
+            self._quote(low=4000.0),          # 最低价高于收盘价
+            self._quote(close=0.0),
+        ):
+            with mock.patch.object(dm, "_INDEX_QUOTE_SOURCES", (lambda s, q=bad: q,)):
+                self.assertIsNone(dm._index_quote_bar("000300", "20261124"))
+
+    def test_quote_bar_units_match_cache(self):
+        with mock.patch.object(dm, "_INDEX_QUOTE_SOURCES", (lambda s: self._quote(),)):
+            bar = dm._index_quote_bar("000300", "20261124")
+        self.assertIsNotNone(bar)
+        self.assertEqual(bar["date"], "20261124")
+        self.assertAlmostEqual(bar["close"], 3963.82)
+        self.assertAlmostEqual(bar["pct"], (3963.82 / 3958.29 - 1) * 100, places=6)
+        # amount 沿用缓存口径（成交量手数），不能写成成交额，否则势能比值会差几个数量级
+        self.assertAlmostEqual(bar["amount"], bar["volume"])
+
+    def test_sina_quote_parsing_unit_per_market(self):
+        def quote_text(name, vol, amt):
+            fields = [name, "4004.0355", "3958.2938", "3963.8232", "4011.6853",
+                      "3957.9221", "0", "0", str(vol), str(amt)] + ["0"] * 20 + \
+                     ["2026-11-24", "15:35:39", "00", ""]
+            return 'var hq_str_x="' + ",".join(fields) + '";'
+
+        # 沪市指数报“手”：197,381,230 手 ≈ 成交额 5068.7 亿元
+        with mock.patch.object(dm, "_http_text",
+                               return_value=quote_text("沪深300", 197381230,
+                                                       506865912791)):
+            q = dm._sina_index_quote("000300")
+        self.assertAlmostEqual(q["close"], 3963.8232)
+        self.assertAlmostEqual(q["volume"], 197381230.0)
+
+        # 深市指数报“股”：59,066,319,644 股要折成 590,663,196 手
+        with mock.patch.object(dm, "_http_text",
+                               return_value=quote_text("深证成指", 59066319644,
+                                                       883224915525)):
+            q = dm._sina_index_quote("399001")
+        self.assertAlmostEqual(q["volume"], 590663196.44)
+        self.assertEqual(q["date"], "20261124")
+
+    def test_tx_quote_parsing(self):
+        fields = ["1", "沪深300", "000300", "3963.82", "3958.29", "4004.04",
+                  "197381230"] + ["0"] * 23 + ["20261124161409"] + ["0"] * 7
+        fields[33], fields[34] = "4011.69", "3957.92"
+        text = 'v_sh000300="' + "~".join(fields) + '";'
+        with mock.patch.object(dm, "_http_text", return_value=text):
+            q = dm._tx_index_quote("000300")
+        self.assertIsNotNone(q)
+        self.assertEqual(q["date"], "20261124")
+        self.assertEqual(q["clock"], "16:14")
+        self.assertAlmostEqual(q["high"], 4011.69)
+        self.assertAlmostEqual(q["volume"], 197381230.0)
+
+    def test_em_quote_parsing_uses_beijing_time(self):
+        ts = int(dt.datetime(2026, 11, 24, 7, 35, tzinfo=dt.timezone.utc).timestamp())
+        payload = json.dumps({"data": {"f43": 396382, "f44": 401169, "f45": 395792,
+                                       "f46": 400404, "f47": 197381230,
+                                       "f48": 506865912791, "f59": 2,
+                                       "f60": 395829, "f86": ts}})
+        with mock.patch.object(dm, "_http_text", return_value=payload):
+            q = dm._em_index_quote("000300")
+        self.assertIsNotNone(q)
+        self.assertEqual(q["date"], "20261124")
+        self.assertEqual(q["clock"], "15:35")
+        self.assertAlmostEqual(q["close"], 3963.82)
+
+    def test_sina_kline_parsing_scales_volume(self):
+        payload = json.dumps([
+            {"day": "2026-11-23", "open": "3931.465", "high": "3968.448",
+             "low": "3901.493", "close": "3958.294", "volume": "20394325600"},
+            {"day": "2026-11-24", "open": "4004.036", "high": "4011.685",
+             "low": "3957.922", "close": "3963.823", "volume": "19738123000"},
+        ])
+        with mock.patch.object(dm, "_http_text", return_value=payload):
+            df = dm._sina_index_klines("000300", 120)
+        self.assertEqual(len(df), 2)
+        self.assertEqual(list(df["date"]), ["20261123", "20261124"])
+        self.assertAlmostEqual(float(df["volume"].iloc[-1]), 197381230.0)
+        self.assertAlmostEqual(float(df["pct"].iloc[-1]),
+                               (3963.823 / 3958.294 - 1) * 100, places=6)
+
+    def test_index_daily_fills_today_and_persists_cache(self):
+        dates = ["20261118", "20261119", "20261120", "20261123"]
+        with tempfile.TemporaryDirectory() as td:
+            idx_dir = Path(td) / "index"
+            idx_dir.mkdir()
+            with mock.patch.object(dm, "INDEX_DIR", idx_dir), \
+                    mock.patch.object(dm, "_index_hist",
+                                      return_value=self._frame(dates)), \
+                    mock.patch.object(dm, "prev_trade_date", return_value="20261123"), \
+                    mock.patch.object(dm, "_INDEX_QUOTE_SOURCES",
+                                      (lambda s: self._quote(),)):
+                df = dm.index_daily("000300", "20261124", 60)
+            self.assertEqual(str(df["date"].iloc[-1]), "20261124")
+            self.assertAlmostEqual(float(df["close"].iloc[-1]), 3963.82)
+            cached = pd.read_pickle(idx_dir / "000300.pkl")
+            self.assertEqual(str(cached["date"].iloc[-1]), "20261124")
+
+    def test_index_daily_refuses_gap_fill(self):
+        dates = ["20261118", "20261119", "20261120", "20261123"]
+        with tempfile.TemporaryDirectory() as td:
+            idx_dir = Path(td) / "index"
+            idx_dir.mkdir()
+            with mock.patch.object(dm, "INDEX_DIR", idx_dir), \
+                    mock.patch.object(dm, "_index_hist",
+                                      return_value=self._frame(dates)), \
+                    mock.patch.object(dm, "prev_trade_date", return_value="20261120"), \
+                    mock.patch.object(dm, "_INDEX_QUOTE_SOURCES",
+                                      (lambda s: self._quote(),)):
+                df = dm.index_daily("000300", "20261124", 60)
+        # 缺口超过一天时宁可用昨天收盘，也不拼一根“假”K 线
+        self.assertEqual(str(df["date"].iloc[-1]), "20261123")
 
 
 if __name__ == "__main__":

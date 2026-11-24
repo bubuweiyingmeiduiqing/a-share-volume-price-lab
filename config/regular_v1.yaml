@@ -1354,6 +1354,8 @@ runtime:
     index_history_days: 260
     fetch_workers: 4
     spot_cache_minutes: 60
+    # 收盘后指数日线接口还没更新时，用实时行情补当日 K 线（否则整轮收盘直接 DataError）
+    index_realtime_fill: true
   push:
     enabled: true
     premarket_heartbeat: true
