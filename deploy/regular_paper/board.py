@@ -201,7 +201,8 @@ def index_section(market: dm.MarketData, date: str, params, res=None) -> list[st
 
     mk = market_rows(market, date, params)
     if mk.get("n"):
-        L.append(f"- 全市场：上涨 {mk['up']} / 下跌 {mk['down']}（沪深 {mk['n']} 只）｜"
+        scope = "全市场" if mk["n"] >= 4000 else f"截断快照 {mk['n']} 只"
+        L.append(f"- {scope}：上涨 {mk['up']} / 下跌 {mk['down']}｜"
                  f"成交额 {mk['amount_yi']:,.0f} 亿元｜"
                  f"涨停 {mk['zt']} / 跌停 {mk['dt']}（{mk['limit_src']}）")
     if mk.get("pool_n"):
@@ -296,20 +297,25 @@ def sector_section(date: str, params) -> list[str]:
     early = int(m["repair"].sum())
     strict = int(m["strict"].sum())
     top_n = int(params.rt("board", "top_sectors", default=6))
-    # 早期修复通道优先（同看板口径），不足 top_n 再用其余板块按分数补齐
-    top = pd.concat([m[m["repair"]].sort_values("score", ascending=False),
-                     m[~m["repair"]].sort_values("score", ascending=False)]).head(top_n)
+    top = m[m["repair"]].sort_values("score", ascending=False).head(top_n)
 
     L = ["**板块资金扫描**（同花顺概念，按 5 日资金/强度打分）"]
     L.append(f"- 样本 {len(m)} 个概念板块：符合早期修复条件 {early} 个，"
-             f"符合严格趋势延续条件 {strict} 个（下表早期修复优先，不足再按分数补齐）")
+             f"符合严格趋势延续条件 {strict} 个")
     L.append("")
-    L.append("| 排名 | 板块 | 5日资金 | 今日资金 | 归一化资金 | 今日涨跌 | 5日涨跌 | 标签 |")
-    L.append("|---|---|---|---|---|---|---|---|")
-    for i, (_, r) in enumerate(top.iterrows(), 1):
-        L.append(f"| {i} | {r['行业']} | {_fmt_money_yi(r['f5'])} | "
-                 f"{_fmt_money_yi(r['f1'])} | {r['norm5']:+.2f}亿/家 | "
-                 f"{r['chg']:+.2f}% | {r['chg5']:+.2f}% | {sector_tag(r)} |")
+    if early == 0:
+        strong = m.sort_values("f1", ascending=False).head(2)
+        L.append("- 今日没有板块通过早期修复条件（5 日+今日资金双流入且当日上涨），"
+                 "不硬凑排名；资金最强的两个板块："
+                 + "、".join(f"{r['行业']} 今日 {r['f1']:+.2f}亿 / 5日 {r['f5']:+.2f}亿"
+                             for _, r in strong.iterrows()))
+    else:
+        L.append("| 排名 | 板块 | 5日资金 | 今日资金 | 归一化资金 | 今日涨跌 | 5日涨跌 | 标签 |")
+        L.append("|---|---|---|---|---|---|---|---|")
+        for i, (_, r) in enumerate(top.iterrows(), 1):
+            L.append(f"| {i} | {r['行业']} | {_fmt_money_yi(r['f5'])} | "
+                     f"{_fmt_money_yi(r['f1'])} | {r['norm5']:+.2f}亿/家 | "
+                     f"{r['chg']:+.2f}% | {r['chg5']:+.2f}% | {sector_tag(r)} |")
 
     # 新旧力量对比：固定观察清单，按资金方向分组，便于一眼看出风格切换
     watch = params.rt("board", "watch_sectors", default=DEFAULT_WATCH) or []
@@ -386,7 +392,7 @@ def leader_section(market: dm.MarketData, date: str, params, plan: dict | None =
     L.append("|---|---|---|---|---|---|---|---|")
     for _, r in top.iterrows():
         mark = "★计划内" if r["code"] in planned else ""
-        L.append(f"| {r['code']} {r['name']} | {r.get('industry', '') or '未分类'} | "
+        L.append(f"| {r['code']} {r['name']} | {r.get('industry') or '—'} | "
                  f"{_fmt_money_yi(r['f5'])} | {_fmt_money_yi(r['f1'])} | "
                  f"{r['ratio']:+.2f}% | {r['chg5']:+.2f}% | {r['ext']:+.2%} | {mark} |")
     L.append("- 说明：研究候选，不是成交信号；只有「明日计划」里的候选才按开盘区间成交。")

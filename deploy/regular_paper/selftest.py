@@ -687,6 +687,38 @@ class BoardTest(unittest.TestCase):
         self.assertIn("★计划内", text)
         self.assertIn("研究候选，不是成交信号", text)
 
+    def test_sector_empty_state_when_nothing_qualifies(self):
+        now = pd.DataFrame({
+            "行业": ["银行", "白酒"],
+            "行业-涨跌幅": [-0.6, -2.1],
+            "净额": ["-2.3", "-1.1"],
+            "公司家数": [42, 20],
+        })
+        d5 = pd.DataFrame({
+            "行业": ["银行", "白酒"],
+            "阶段涨跌幅": [-3.2, -4.5],
+            "净额": ["-15.0", "-9.0"],
+            "公司家数": [42, 20],
+        })
+        with mock.patch.object(bd.ak, "stock_fund_flow_concept",
+                               side_effect=[now, d5]):
+            text = "\n".join(bd.sector_section("20261125", self.params))
+        self.assertIn("没有板块通过早期修复条件", text)
+        self.assertNotIn("| 排名 |", text)
+
+    def test_truncated_snapshot_is_labelled(self):
+        codes = list(self.market.bars.keys())
+        idx = self.market.index.tail(60).reset_index(drop=True).copy()
+        idx["date"] = idx["date"].astype(str)
+        rows = [{"code": c, "name": "", "pct": 1.0, "amount": 1e9,
+                 "snap_date": self.market.date} for c in codes]
+        with mock.patch.object(bd.dm, "index_daily", return_value=idx), \
+                mock.patch.object(bd.dm, "spot_snapshot", return_value=rows), \
+                mock.patch.object(bd, "limit_counts", return_value=(64, 4, "东财涨跌停池")):
+            text = "\n".join(bd.index_section(self.market, self.market.date, self.params))
+        self.assertIn("截断快照", text)
+        self.assertNotIn("全市场：", text)
+
     def test_section_degrades_when_source_fails(self):
         def boom(*a, **k):
             raise RuntimeError("connection reset")
