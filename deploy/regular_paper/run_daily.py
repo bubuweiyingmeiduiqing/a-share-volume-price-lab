@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pandas as pd
 
+import board as bd
 import data as dm
 import indicators as ind
 import portfolio as pf
@@ -339,6 +340,15 @@ def _review_section(date: str, market: dm.MarketData, params, res, acct: dict,
     return L
 
 
+def _board_lines(name: str, fn) -> list[str]:
+    """看板某一节失败只跳过该节，不能让收盘日报整体失败。"""
+    try:
+        return list(fn())
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 看板「{name}」生成失败：{e}")
+        return []
+
+
 def build_report(date: str, market: dm.MarketData, params, res, acct: dict,
                  plan: dict, fills: list[dict], settle_ev: list[dict], m: dict,
                  prev_plan: dict | None = None, state_dir: Path | None = None,
@@ -359,6 +369,9 @@ def build_report(date: str, market: dm.MarketData, params, res, acct: dict,
     L.append("温度分解：" + " / ".join(
         f"{k} {v:.0%}" for k, v in res.parts.items()))
     L.append("")
+    if bd.enabled_for(market, params):
+        L.extend(_board_lines("大盘环境",
+                              lambda: bd.index_section(market, date, params, res)))
 
     L.append(f"**账户**：净值 **{_fmt_money(eq)}**"
              f"（当日 {m['day_ret']:+.2%}，累计 {total_ret:+.2%}）")
@@ -403,6 +416,11 @@ def build_report(date: str, market: dm.MarketData, params, res, acct: dict,
                  f"成本 {p['entry_price']:.2f} 现价 {cur:.2f} **{r:+.2%}** "
                  f"持 {pf._hold_days(p['entry_date'], date)} 天 | 止损 {p['stop']:.2f}")
     L.append("")
+
+    if bd.enabled_for(market, params):
+        L.extend(_board_lines("板块资金", lambda: bd.sector_section(date, params)))
+        L.extend(_board_lines("龙头筛选",
+                              lambda: bd.leader_section(market, date, params, plan)))
 
     L.append(f"**明日计划**（{dm.dash(plan.get('for_date')) if plan.get('for_date') else '待定'}）")
     L.append(f"当前状态「{res.state_cn}」→ "

@@ -31,6 +31,7 @@ from unittest import mock
 import pandas as pd
 import yaml
 
+import board as bd
 import data as dm
 import deploy_check as dc
 import portfolio as pf
@@ -590,6 +591,138 @@ class IndexFallbackTest(unittest.TestCase):
                 df = dm.index_daily("000300", "20261124", 60)
         # 缺口超过一天时宁可用昨天收盘，也不拼一根“假”K 线
         self.assertEqual(str(df["date"].iloc[-1]), "20261123")
+
+
+class BoardTest(unittest.TestCase):
+    """收盘研究看板：只读上下文，必须先保证“断连不炸收盘”。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.params = load_params(profile="balanced")
+        demo = sy.demo_market(cls.params)
+        cls.market = dm.MarketData(date=demo.date, benchmark="000300",
+                                   index=demo.index, bars=demo.bars,
+                                   meta=demo.meta, source="akshare")
+
+    @staticmethod
+    def _concept_frames():
+        now = pd.DataFrame({
+            "行业": ["物理AI", "PCB板", "银行"],
+            "行业-涨跌幅": [3.2, 1.1, -0.6],
+            "净额": ["12.5", "3.2", "-2.3"],
+            "公司家数": [45, 60, 42],
+        })
+        d5 = pd.DataFrame({
+            "行业": ["物理AI", "PCB板", "银行"],
+            "阶段涨跌幅": [8.5, 4.2, -3.2],
+            "净额": ["38.2", "-7.29", "-15.0"],
+            "公司家数": [45, 60, 42],
+        })
+        return now, d5
+
+    @staticmethod
+    def _stock_frames(codes):
+        n = len(codes)
+        now = pd.DataFrame({
+            "股票代码": codes, "股票简称": [f"股{i}" for i in range(n)],
+            "最新价": [10.0] * n, "涨跌幅": ["1.2%"] * n, "换手率": ["3.5%"] * n,
+            "净额": [f"{i * 0.3:.2f}亿" for i in range(n)],
+        })
+        d5 = pd.DataFrame({
+            "股票代码": codes, "股票简称": [f"股{i}" for i in range(n)],
+            "阶段涨跌幅": [f"{i * 1.5:.2f}%" for i in range(n)],
+            "资金流入净额": [f"{i * 1.1:.2f}亿" for i in range(n)],
+        })
+        return now, d5
+
+    def test_fund_flow_units(self):
+        self.assertAlmostEqual(bd._to_yi("1.25亿"), 1.25)
+        self.assertAlmostEqual(bd._to_yi("-5602.50万"), -0.56025, places=6)
+        self.assertAlmostEqual(bd._to_yi("0.65"), 0.65)
+        self.assertEqual(bd._to_yi("--"), 0.0)
+        self.assertAlmostEqual(bd._pct("-1.2%"), -1.2)
+        self.assertEqual(bd._pct("--"), 0.0)
+
+    def test_limit_hit_by_board(self):
+        hit = bd._limit_hit
+        self.assertTrue(hit({"code": "600000", "name": "浦发银行", "pct": 9.9}, True))
+        self.assertFalse(hit({"code": "600000", "name": "浦发银行", "pct": 9.0}, True))
+        self.assertTrue(hit({"code": "300001", "name": "特锐德", "pct": 19.9}, True))
+        self.assertTrue(hit({"code": "688001", "name": "华兴源创", "pct": -19.9}, False))
+        self.assertTrue(hit({"code": "830001", "name": "某北交", "pct": 29.9}, True))
+        self.assertTrue(hit({"code": "600001", "name": "ST某股", "pct": 4.9}, True))
+        self.assertFalse(hit({"code": "600001", "name": "ST某股", "pct": 4.9}, False))
+
+    def test_sector_tags(self):
+        tag = board_sector_tag = bd.sector_tag
+        self.assertEqual(tag({"f5": 10, "f1": 2, "chg": 3}), "早期修复")
+        self.assertEqual(tag({"f5": 10, "f1": -2, "chg": 1}), "资金分歧")
+        self.assertEqual(tag({"f5": -10, "f1": -2, "chg": -1}), "退潮")
+        self.assertEqual(tag({"f5": -10, "f1": 2, "chg": 1}), "短线反抽")
+        self.assertEqual(tag({"f5": 0, "f1": 0, "chg": 0}), "观察")
+        del board_sector_tag
+
+    def test_sections_render_with_sources(self):
+        codes = list(self.market.bars.keys())
+        c_now, c_d5 = self._concept_frames()
+        s_now, s_d5 = self._stock_frames(codes)
+        idx = self.market.index.tail(60).reset_index(drop=True).copy()
+        idx["date"] = idx["date"].astype(str)
+        rows = [{"code": c, "name": "", "pct": 1.0, "amount": 1e9,
+                 "snap_date": self.market.date} for c in codes]
+        with mock.patch.object(bd.ak, "stock_fund_flow_concept",
+                               side_effect=[c_now, c_d5]), \
+                mock.patch.object(bd.ak, "stock_fund_flow_individual",
+                                  side_effect=[s_now, s_d5]), \
+                mock.patch.object(bd.dm, "index_daily", return_value=idx), \
+                mock.patch.object(bd.dm, "spot_snapshot", return_value=rows), \
+                mock.patch.object(bd, "limit_counts", return_value=(64, 4, "东财涨跌停池")), \
+                mock.patch.object(bd, "_is_today", return_value=True):
+            text = "\n".join(bd.build(self.market, self.market.date, self.params,
+                                       plan={"candidates": [{"code": codes[2]}]}))
+        self.assertIn("大盘环境", text)
+        self.assertIn("板块资金扫描", text)
+        self.assertIn("核心龙头筛选", text)
+        self.assertIn("早期修复", text)
+        self.assertIn("★计划内", text)
+        self.assertIn("研究候选，不是成交信号", text)
+
+    def test_section_degrades_when_source_fails(self):
+        def boom(*a, **k):
+            raise RuntimeError("connection reset")
+        with mock.patch.object(bd.dm, "index_daily", side_effect=boom), \
+                mock.patch.object(bd.ak, "stock_fund_flow_concept", side_effect=boom), \
+                mock.patch.object(bd.ak, "stock_fund_flow_individual", side_effect=boom):
+            lines = bd.build(self.market, self.market.date, self.params)
+        text = "\n".join(lines)
+        self.assertIn("本节跳过", text)
+        self.assertNotIn("Traceback", text)
+
+    def test_skips_synthetic_and_historical(self):
+        syn = dm.MarketData(date=self.market.date, benchmark="000300",
+                            index=self.market.index, bars=self.market.bars,
+                            meta=self.market.meta, source="synthetic")
+        self.assertEqual(bd.build(syn, syn.date, self.params), [])
+        with mock.patch.object(bd, "index_section", return_value=["**大盘环境**", ""]), \
+                mock.patch.object(bd, "_is_today", return_value=False):
+            lines = bd.build(self.market, "20261116", self.params)
+        self.assertIn("历史日期回放", "\n".join(lines))
+
+    def test_report_includes_board_when_enabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "state"
+            reports = Path(td) / "reports"
+            sy.seed_demo_account(self.params, self.market, state, force=True)
+            with mock.patch.object(bd, "enabled_for", return_value=True), \
+                    mock.patch.object(bd, "index_section",
+                                      return_value=["**大盘环境**", "- 看板占位", ""]), \
+                    mock.patch.object(bd, "sector_section", return_value=[]), \
+                    mock.patch.object(bd, "leader_section", return_value=[]):
+                rc = rd.run(self.market.date, False, self.params, force=True,
+                            market=self.market, state_dir=state, report_dir=reports)
+            self.assertEqual(rc, 0)
+            text = (reports / "2026-11-06.md").read_text(encoding="utf-8")
+            self.assertIn("看板占位", text)
 
 
 if __name__ == "__main__":

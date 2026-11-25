@@ -1356,6 +1356,18 @@ runtime:
     spot_cache_minutes: 60
     # 收盘后指数日线接口还没更新时，用实时行情补当日 K 线（否则整轮收盘直接 DataError）
     index_realtime_fill: true
+  # 收盘研究看板（只读研究上下文，不参与交易决策）
+  board:
+    enabled: true
+    indices:
+      - ["000001", "上证指数"]
+      - ["000300", "沪深300"]
+      - ["000852", "中证1000"]
+      - ["000688", "科创50"]
+    top_sectors: 6
+    top_stocks: 9
+    watch_sectors: ["银行", "证券", "保险", "白酒", "半导体", "人形机器人", "PCB",
+                    "算力租赁", "液冷服务器"]
   push:
     enabled: true
     premarket_heartbeat: true
