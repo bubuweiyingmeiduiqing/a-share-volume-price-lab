@@ -205,21 +205,22 @@ def save_day(conn: sqlite3.Connection, data: dict, account: dict | None = None,
                  "ma20": r.get("ma20"), "above": int(bool(r.get("above"))),
                  "ext": r.get("ext"), "ma20_chg": r.get("ma20_chg")})
 
-    for i, r in enumerate(data.get("sectors") or [], 1):
+    # 入库优先用全量（sectors_all / leaders_all），markdown 只展示 top
+    for i, r in enumerate(data.get("sectors_all") or data.get("sectors") or [], 1):
         _upsert(conn, "sectors",
                 ["date", "name", "f5", "f1", "norm5", "chg", "chg5", "n",
                  "score", "tag", "rank", "repair"],
                 {"date": date, "name": r.get("name"), "f5": r.get("f5"), "f1": r.get("f1"),
                  "norm5": r.get("norm5"), "chg": r.get("chg"), "chg5": r.get("chg5"),
                  "n": r.get("n"), "score": r.get("score"), "tag": r.get("tag"),
-                 "rank": r.get("rank", i), "repair": int(bool(r.get("repair")))})
+                 "rank": r.get("rank") or i, "repair": int(bool(r.get("repair")))})
 
     for r in data.get("watch") or []:
         _upsert(conn, "watch", ["date", "name", "f1", "f5", "chg"],
                 {"date": date, "name": r.get("name"), "f1": r.get("f1"),
                  "f5": r.get("f5"), "chg": r.get("chg")})
 
-    for r in data.get("leaders") or []:
+    for r in data.get("leaders_all") or data.get("leaders") or []:
         _upsert(conn, "leaders",
                 ["date", "code", "name", "industry", "f5", "f1", "ratio",
                  "chg5", "ext", "score", "in_plan"],
