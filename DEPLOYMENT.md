@@ -135,10 +135,9 @@ cd ~/a-share-volume-price-lab
 VPS 不再依赖“某人记得去 ssh 部署”，而是一个幂等的同步脚本 + 两条 cron：
 
 ```bash
-# crontab -l | grep deploy-sync
-45 8  * * 1-5  cd ~/a-share-volume-price-lab && flock -n ~/.local/state/kai/locks/deploy-sync.lock \
-               timeout -k 15s 20m bash deploy/sync_from_github.sh >> ~/deploy-sync.log 2>&1
-45 15 * * 1-5  （同上）
+# crontab -l | grep deploy-sync（这两行就是 VPS 上的实际配置）
+45 8 * * 1-5 cd /home/ubuntu/a-share-volume-price-lab && /usr/bin/flock -n -E 75 /home/ubuntu/.local/state/kai/locks/deploy-sync.lock /usr/bin/timeout -k 15s 20m /usr/bin/bash deploy/sync_from_github.sh >> /home/ubuntu/deploy-sync.log 2>&1
+45 15 * * 1-5 cd /home/ubuntu/a-share-volume-price-lab && /usr/bin/flock -n -E 75 /home/ubuntu/.local/state/kai/locks/deploy-sync.lock /usr/bin/timeout -k 15s 20m /usr/bin/bash deploy/sync_from_github.sh >> /home/ubuntu/deploy-sync.log 2>&1
 ```
 
 - 08:45 保证 09:15 盘前跑的是 GitHub 最新代码；15:45 保证 16:10 / 16:20 收盘跑的是同一份；
