@@ -677,6 +677,8 @@ class BoardTest(unittest.TestCase):
                  "snap_date": self.market.date} for c in codes]
         with mock.patch.object(bd.ak, "stock_fund_flow_concept",
                                side_effect=[c_now, c_d5]), \
+                mock.patch.object(bd.ak, "stock_fund_flow_industry",
+                                  side_effect=[c_now, c_d5]), \
                 mock.patch.object(bd.ak, "stock_fund_flow_individual",
                                   side_effect=[s_now, s_d5]), \
                 mock.patch.object(bd.dm, "index_daily", return_value=idx), \
@@ -706,7 +708,9 @@ class BoardTest(unittest.TestCase):
             "公司家数": [42, 20],
         })
         with mock.patch.object(bd.ak, "stock_fund_flow_concept",
-                               side_effect=[now, d5]):
+                               side_effect=[now, d5]), \
+                mock.patch.object(bd.ak, "stock_fund_flow_industry",
+                                  side_effect=[now, d5]):
             text = "\n".join(bd.sector_section("20261125", self.params))
         self.assertIn("没有板块通过早期修复条件", text)
         self.assertNotIn("| 排名 |", text)
@@ -740,7 +744,8 @@ class BoardTest(unittest.TestCase):
                             index=self.market.index, bars=self.market.bars,
                             meta=self.market.meta, source="synthetic")
         self.assertEqual(bd.build(syn, syn.date, self.params), [])
-        with mock.patch.object(bd, "index_section", return_value=["**大盘环境**", ""]), \
+        with mock.patch.object(bd, "index_data", return_value={"indices": [],
+                                                               "market": {}}), \
                 mock.patch.object(bd, "_is_today", return_value=False):
             lines = bd.build(self.market, "20261116", self.params)
         self.assertIn("历史日期回放", "\n".join(lines))
