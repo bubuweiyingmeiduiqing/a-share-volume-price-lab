@@ -185,10 +185,18 @@ def market_rows(market: dm.MarketData, date: str, params) -> dict:
     return out
 
 
-def index_section(market: dm.MarketData, date: str, params, res=None) -> list[str]:
+def index_data(market: dm.MarketData, date: str, params) -> dict:
+    """大盘环境数据：多指数 + 全市场统计（网页看板与 markdown 共用一份）。"""
     rows = index_rows(date, params)
+    return {"indices": rows,
+            "market": market_rows(market, date, params) if rows else {}}
+
+
+def index_lines(data: dict, res=None) -> list[str]:
+    rows = data.get("indices") or []
     if not rows:
         return []
+    mk = data.get("market") or {}
     L = ["**大盘环境**", ""]
     L.append("| 指数 | 收盘 | 5日 | 20日 | MA20 | 距MA20 | MA20较5日前 |")
     L.append("|---|---|---|---|---|---|---|")
@@ -199,7 +207,6 @@ def index_section(market: dm.MarketData, date: str, params, res=None) -> list[st
     below = sum(1 for r in rows if not r["above"])
     ma20_down = sum(1 for r in rows if r["ma20_chg"] < 0)
 
-    mk = market_rows(market, date, params)
     if mk.get("n"):
         scope = "全市场" if mk["n"] >= 4000 else f"截断快照 {mk['n']} 只"
         L.append(f"- {scope}：上涨 {mk['up']} / 下跌 {mk['down']}｜"
@@ -285,48 +292,70 @@ def _watch_rows(watch: list[str], concept: pd.DataFrame) -> list[tuple[str, obje
     return rows
 
 
-def sector_section(date: str, params) -> list[str]:
+def sector_data(params) -> dict:
+    """板块资金数据：全部概念板块（入库）+ 早期修复 top（展示）。"""
     try:
         m = _ths_frame("概念")
     except Exception as e:  # noqa: BLE001
         print(f"[warn] 板块资金扫描不可用：{e}")
-        return ["**板块资金扫描**", "- 同花顺板块资金流不可用，本节跳过（不影响交易计划）。", ""]
-
+        return {"error": str(e)}
     m["repair"] = (m["f5"] > 0) & (m["f1"] > 0) & (m["chg"] > 0)
     m["strict"] = m["repair"] & (m["chg"] >= 1.0) & (m["chg5"] >= 3.0)
-    early = int(m["repair"].sum())
-    strict = int(m["strict"].sum())
     top_n = int(params.rt("board", "top_sectors", default=6))
     top = m[m["repair"]].sort_values("score", ascending=False).head(top_n)
 
+    def rec(r, rank=None):
+        d = {"name": r["行业"], "f5": float(r["f5"]), "f1": float(r["f1"]),
+             "norm5": float(r["norm5"]), "chg": float(r["chg"]),
+             "chg5": float(r["chg5"]), "n": int(r["n"]), "score": float(r["score"]),
+             "tag": sector_tag(r), "repair": bool(r["repair"])}
+        if rank is not None:
+            d["rank"] = rank
+        return d
+
+    watch = params.rt("board", "watch_sectors", default=DEFAULT_WATCH) or []
+    hit = _watch_rows([str(w) for w in watch], m)
+    return {
+        "n": int(len(m)),
+        "early": int(m["repair"].sum()),
+        "strict": int(m["strict"].sum()),
+        "sectors": [rec(r, i) for i, (_, r) in enumerate(top.iterrows(), 1)],
+        "sectors_all": [rec(r) for _, r in m.sort_values("score", ascending=False).iterrows()],
+        "watch": [{"name": w, "f1": float(r["f1"]), "f5": float(r["f5"]),
+                   "chg": float(r["chg"])} for w, r in hit],
+    }
+
+
+def sector_lines(data: dict) -> list[str]:
+    if data.get("error"):
+        return ["**板块资金扫描**", "- 同花顺板块资金流不可用，本节跳过（不影响交易计划）。", ""]
+    rows = data.get("sectors") or []
     L = ["**板块资金扫描**（同花顺概念，按 5 日资金/强度打分）"]
-    L.append(f"- 样本 {len(m)} 个概念板块：符合早期修复条件 {early} 个，"
-             f"符合严格趋势延续条件 {strict} 个")
+    L.append(f"- 样本 {data.get('n', 0)} 个概念板块：符合早期修复条件 "
+             f"{data.get('early', 0)} 个，符合严格趋势延续条件 {data.get('strict', 0)} 个")
     L.append("")
-    if early == 0:
-        strong = m.sort_values("f1", ascending=False).head(2)
+    if not rows:
+        strong = sorted((data.get("sectors_all") or []), key=lambda r: -r["f1"])[:2]
         L.append("- 今日没有板块通过早期修复条件（5 日+今日资金双流入且当日上涨），"
                  "不硬凑排名；资金最强的两个板块："
-                 + "、".join(f"{r['行业']} 今日 {r['f1']:+.2f}亿 / 5日 {r['f5']:+.2f}亿"
-                             for _, r in strong.iterrows()))
+                 + "、".join(f"{r['name']} 今日 {r['f1']:+.2f}亿 / 5日 {r['f5']:+.2f}亿"
+                             for r in strong))
     else:
         L.append("| 排名 | 板块 | 5日资金 | 今日资金 | 归一化资金 | 今日涨跌 | 5日涨跌 | 标签 |")
         L.append("|---|---|---|---|---|---|---|---|")
-        for i, (_, r) in enumerate(top.iterrows(), 1):
-            L.append(f"| {i} | {r['行业']} | {_fmt_money_yi(r['f5'])} | "
+        for i, r in enumerate(rows, 1):
+            L.append(f"| {i} | {r['name']} | {_fmt_money_yi(r['f5'])} | "
                      f"{_fmt_money_yi(r['f1'])} | {r['norm5']:+.2f}亿/家 | "
-                     f"{r['chg']:+.2f}% | {r['chg5']:+.2f}% | {sector_tag(r)} |")
+                     f"{r['chg']:+.2f}% | {r['chg5']:+.2f}% | {r['tag']} |")
 
-    # 新旧力量对比：固定观察清单，按资金方向分组，便于一眼看出风格切换
-    watch = params.rt("board", "watch_sectors", default=DEFAULT_WATCH) or []
-    hit = _watch_rows([str(w) for w in watch], m)
+    hit = data.get("watch") or []
     if hit:
         L.append("")
         L.append("- 新旧力量对比：" + "；".join(
-            f"{w} 今日 {r['f1']:+.2f}亿 / 5日 {r['f5']:+.2f}亿（{r['chg']:+.2f}%）"
-            for w, r in hit[:6]))
-        inflow = [w for w, r in hit if r["f1"] > 0 and r["f5"] > 0]
-        outflow = [w for w, r in hit if r["f1"] < 0 and r["f5"] < 0]
+            f"{r['name']} 今日 {r['f1']:+.2f}亿 / 5日 {r['f5']:+.2f}亿（{r['chg']:+.2f}%）"
+            for r in hit[:6]))
+        inflow = [r["name"] for r in hit if r["f1"] > 0 and r["f5"] > 0]
+        outflow = [r["name"] for r in hit if r["f1"] < 0 and r["f5"] < 0]
         if inflow or outflow:
             L.append(f"- 资金取向：{'、'.join(inflow) or '无'} 持续性流入；"
                      f"{'、'.join(outflow) or '无'} 持续性流出")
@@ -373,25 +402,43 @@ def leader_frame(market: dm.MarketData, date: str) -> pd.DataFrame:
     return m
 
 
-def leader_section(market: dm.MarketData, date: str, params, plan: dict | None = None) -> list[str]:
+def leader_data(market: dm.MarketData, date: str, params,
+                plan: dict | None = None) -> dict:
+    """龙头数据：扫描池 ∩ 个股资金流，top 用于展示、全部用于入库。"""
     try:
         m = leader_frame(market, date)
     except Exception as e:  # noqa: BLE001
         print(f"[warn] 龙头筛选不可用：{e}")
-        return ["**核心龙头筛选**", "- 个股资金流不可用，本节跳过（不影响交易计划）。", ""]
+        return {"error": str(e)}
+    planned = {c.get("code") for c in (plan or {}).get("candidates", [])} or set()
 
-    top_n = int(params.rt("board", "top_stocks", default=9))
+    def rec(r):
+        return {"code": r["code"], "name": r["name"],
+                "industry": r.get("industry") or "",
+                "f5": float(r["f5"]), "f1": float(r["f1"]),
+                "ratio": float(r["ratio"]), "chg5": float(r["chg5"]),
+                "ext": float(r["ext"]), "score": float(r["score"]),
+                "in_plan": r["code"] in planned}
+
     pool = m[(m["f5"] > 0) & (m["mv"] > 0)].sort_values("score", ascending=False)
     if pool.empty:
         pool = m.sort_values("score", ascending=False)
-    top = pool.head(top_n)
-    planned = {c.get("code") for c in (plan or {}).get("candidates", [])} or set()
+    top_n = int(params.rt("board", "top_stocks", default=9))
+    return {"leaders": [rec(r) for _, r in pool.head(top_n).iterrows()],
+            "leaders_all": [rec(r) for _, r in m.sort_values("score", ascending=False).iterrows()]}
 
+
+def leader_lines(data: dict) -> list[str]:
+    if data.get("error"):
+        return ["**核心龙头筛选**", "- 个股资金流不可用，本节跳过（不影响交易计划）。", ""]
+    rows = data.get("leaders") or []
+    if not rows:
+        return []
     L = ["**核心龙头筛选**（扫描池 ∩ 个股资金流）", ""]
     L.append("| 股票 | 行业 | 5日资金 | 今日资金 | 5日资金/流通市值 | 5日涨跌 | 距MA20 | 备注 |")
     L.append("|---|---|---|---|---|---|---|---|")
-    for _, r in top.iterrows():
-        mark = "★计划内" if r["code"] in planned else ""
+    for r in rows:
+        mark = "★计划内" if r.get("in_plan") else ""
         L.append(f"| {r['code']} {r['name']} | {r.get('industry') or '—'} | "
                  f"{_fmt_money_yi(r['f5'])} | {_fmt_money_yi(r['f1'])} | "
                  f"{r['ratio']:+.2f}% | {r['chg5']:+.2f}% | {r['ext']:+.2%} | {mark} |")
@@ -416,23 +463,74 @@ def enabled_for(market, params) -> bool:
     return market is not None and getattr(market, "source", "") != "synthetic"
 
 
+def collect(market: dm.MarketData, date: str, params, res=None,
+            plan: dict | None = None) -> dict:
+    """一次拉齐看板数据：markdown 与网页看板共用，避免重复抓同一批接口。"""
+    if not enabled_for(market, params):
+        return {}
+    date = dm.norm_date(date)
+    data: dict = {
+        "date": date,
+        "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "historical": not _is_today(date),
+    }
+    if res is not None:
+        data["regime"] = {"state": res.state, "cn": res.state_cn, "heat": float(res.heat),
+                          "cap": float(res.cap), "allow_new": bool(res.allow_new),
+                          "dwell": int(res.dwell)}
+    try:
+        data.update(index_data(market, date, params))
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 看板「大盘环境」生成失败：{e}")
+    if not data["historical"]:
+        try:
+            data.update(sector_data(params))
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 看板「板块资金」生成失败：{e}")
+            data.update({"error": str(e)})
+        try:
+            data.update(leader_data(market, date, params, plan))
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 看板「龙头筛选」生成失败：{e}")
+    return data
+
+
+def render(data: dict, res=None) -> dict[str, list[str]]:
+    """把数据渲染成 markdown 段落：index / sectors / leaders 三段分开摆放。"""
+    if not data:
+        return {"index": [], "sectors": [], "leaders": []}
+    out = {"index": [], "sectors": [], "leaders": []}
+    for key, fn in (("index", lambda: index_lines(data, res)),
+                    ("sectors", lambda: sector_lines(data)),
+                    ("leaders", lambda: leader_lines(data))):
+        try:
+            out[key] = fn()
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 看板「{key}」渲染失败：{e}")
+    if data.get("historical"):
+        out["sectors"] = ["- 历史日期回放：板块资金、龙头筛选与涨跌停池只有当日数据，本节跳过。", ""]
+    return out
+
+
+# 兼容旧调用：单节直接出文本
+def index_section(market, date, params, res=None) -> list[str]:
+    return index_lines({"date": dm.norm_date(date),
+                        **index_data(market, date, params)}, res)
+
+
+def sector_section(date, params) -> list[str]:
+    return sector_lines(sector_data(params))
+
+
+def leader_section(market, date, params, plan: dict | None = None) -> list[str]:
+    return leader_lines(leader_data(market, date, params, plan))
+
+
 def build(market: dm.MarketData, date: str, params, res=None,
           plan: dict | None = None) -> list[str]:
     """返回看板 markdown 行；关闭或合成数据时返回空。"""
-    if not enabled_for(market, params):
+    data = collect(market, date, params, res, plan)
+    if not data:
         return []
-    if not _is_today(date):
-        # 板块资金/龙虎、涨跌停池只有“当日”接口，历史回放只出大盘环境表
-        lines = list(index_section(market, date, params, res))
-        lines.append("- 历史日期回放：板块资金、龙头筛选与涨跌停池只有当日数据，本节跳过。")
-        lines.append("")
-        return lines
-    lines: list[str] = []
-    for name, fn in (("大盘环境", lambda: index_section(market, date, params, res)),
-                     ("板块资金", lambda: sector_section(date, params)),
-                     ("龙头筛选", lambda: leader_section(market, date, params, plan))):
-        try:
-            lines.extend(fn())
-        except Exception as e:  # noqa: BLE001
-            print(f"[warn] 看板「{name}」生成失败：{e}")
-    return lines
+    parts = render(data, res)
+    return parts["index"] + parts["sectors"] + parts["leaders"]

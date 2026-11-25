@@ -1368,6 +1368,12 @@ runtime:
     top_stocks: 9
     watch_sectors: ["银行", "证券", "保险", "白酒", "半导体", "人形机器人", "PCB",
                     "算力租赁", "液冷服务器"]
+    # 看板数据与网页（2026-11-25）：SQLite 给每周复盘/新功能查询，静态 HTML 给手机看
+    store_db: "state/board.db"
+    site_dir: "/var/www/regular_board"
+    base_url: "https://linsey.43.153.144.97.nip.io/board-73654518152c"
+    history_days: 20
+    weekly_days: 5
   push:
     enabled: true
     premarket_heartbeat: true

@@ -37,8 +37,10 @@ import deploy_check as dc
 import portfolio as pf
 import regime as rg
 import review as rv
+import store
 import run_daily as rd
 import run_premarket as rp
+import webboard as wb
 import strategy as stg
 import synthetic as sy
 from config import ConfigError, Params, load_params
@@ -744,20 +746,152 @@ class BoardTest(unittest.TestCase):
         self.assertIn("历史日期回放", "\n".join(lines))
 
     def test_report_includes_board_when_enabled(self):
+        url = "https://example.test/board-x/d/20261106.html"
         with tempfile.TemporaryDirectory() as td:
             state = Path(td) / "state"
             reports = Path(td) / "reports"
             sy.seed_demo_account(self.params, self.market, state, force=True)
             with mock.patch.object(bd, "enabled_for", return_value=True), \
-                    mock.patch.object(bd, "index_section",
-                                      return_value=["**大盘环境**", "- 看板占位", ""]), \
-                    mock.patch.object(bd, "sector_section", return_value=[]), \
-                    mock.patch.object(bd, "leader_section", return_value=[]):
+                    mock.patch.object(bd, "collect",
+                                      return_value={"date": self.market.date}), \
+                    mock.patch.object(bd, "render", return_value={
+                        "index": ["**大盘环境**", "- 看板占位", ""],
+                        "sectors": [], "leaders": []}), \
+                    mock.patch.object(rd.wb, "publish", return_value=url):
                 rc = rd.run(self.market.date, False, self.params, force=True,
                             market=self.market, state_dir=state, report_dir=reports)
             self.assertEqual(rc, 0)
             text = (reports / "2026-11-06.md").read_text(encoding="utf-8")
             self.assertIn("看板占位", text)
+            self.assertIn(url, text)      # 链接必须进日报（= 进推送）
+
+
+class BoardStoreTest(unittest.TestCase):
+    """看板数据落盘（store.py）与网页渲染（webboard.py）：离线、临时目录。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.params = load_params(profile="balanced")
+
+    @staticmethod
+    def _data(date="20261125") -> dict:
+        return {
+            "date": date,
+            "generated_at": "2026-11-25T16:00:00+08:00",
+            "historical": False,
+            "regime": {"state": "CRASH", "cn": "急跌", "heat": 7.8, "cap": 0.0,
+                       "allow_new": False, "dwell": 1},
+            "indices": [
+                {"name": "上证指数", "code": "000001", "close": 3476.47, "ret5": -3.1,
+                 "ret20": -5.57, "ma20": 3613.0, "above": False, "ext": -3.79,
+                 "ma20_chg": -0.96},
+            ],
+            "market": {"amount_yi": 8988.0, "n": 799, "up": 105, "down": 689,
+                       "zt": 51, "dt": 45, "limit_src": "快照", "pool_n": 300,
+                       "pool_above5": 30.0},
+            "sectors": [{"name": "固体电池", "f5": 12.5, "f1": 3.2, "norm5": 0.28,
+                         "chg": 1.2, "chg5": 4.4, "n": 45, "score": 88.0,
+                         "tag": "早期修复", "repair": True, "rank": 1}],
+            "sectors_all": [{"name": "固体电池", "f5": 12.5, "f1": 3.2, "norm5": 0.28,
+                             "chg": 1.2, "chg5": 4.4, "n": 45, "score": 88.0,
+                             "tag": "早期修复", "repair": True}],
+            "watch": [{"name": "银行", "f1": 23.6, "f5": -15.3, "chg": -0.02}],
+            "leaders": [{"code": "300308", "name": "中际旭创", "industry": "通信",
+                         "f5": 22.2, "f1": 4.0, "ratio": 0.51, "chg5": 3.2,
+                         "ext": -0.12, "score": 91.0, "in_plan": True}],
+            "leaders_all": [{"code": "300308", "name": "中际旭创", "industry": "通信",
+                             "f5": 22.2, "f1": 4.0, "ratio": 0.51, "chg5": 3.2,
+                             "ext": -0.12, "score": 91.0, "in_plan": True}],
+            "trades": [{"code": "601988", "name": "中国银行", "action": "卖出",
+                        "price": 7.49, "reason": "市场急跌清仓", "ret": 0.068, "setup": ""}],
+            "positions": [],
+        }
+
+    def test_save_day_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            conn = store.connect(Path(td) / "board.db")
+            try:
+                data = self._data()
+                store.save_day(conn, data, {"equity": 1034576, "day_ret": 0.0007,
+                                            "cash": 1034576, "mv": 0, "positions_n": 0},
+                               {"for_date": "20261126", "state": "CRASH",
+                                "allow_new": False, "candidates": []})
+                store.save_day(conn, data, {"equity": 1034576, "day_ret": 0.0007,
+                                            "cash": 1034576, "mv": 0, "positions_n": 0},
+                               {"for_date": "20261126", "state": "CRASH",
+                                "allow_new": False, "candidates": []})
+                n_days = conn.execute("SELECT COUNT(*) c FROM days").fetchone()["c"]
+                n_ind = conn.execute("SELECT COUNT(*) c FROM indices").fetchone()["c"]
+                n_sec = conn.execute("SELECT COUNT(*) c FROM sectors").fetchone()["c"]
+                n_lea = conn.execute("SELECT COUNT(*) c FROM leaders").fetchone()["c"]
+                trade = conn.execute("SELECT COUNT(*) c FROM trades").fetchone()["c"]
+                row = conn.execute("SELECT * FROM days WHERE date='20261125'").fetchone()
+            finally:
+                conn.close()
+        self.assertEqual((n_days, n_ind, n_sec, n_lea, trade), (1, 1, 1, 1, 1))
+        self.assertEqual(row["regime_state"], "CRASH")
+        self.assertEqual(row["plan_candidates_n"], 0)
+        self.assertAlmostEqual(row["equity"], 1034576)
+
+    def test_seed_equity_and_weekly(self):
+        with tempfile.TemporaryDirectory() as td:
+            conn = store.connect(Path(td) / "board.db")
+            try:
+                store.seed_equity(conn, [
+                    {"date": "20261123", "equity": 1000000, "ret": 0.0, "cash": 1, "mv": 0},
+                    {"date": "20261124", "equity": 1034576, "ret": 0.03, "cash": 1, "mv": 0},
+                ])
+                store.save_day(conn, self._data("20261125"),
+                               {"equity": 1034576, "day_ret": 0.0, "cash": 1, "mv": 0,
+                                "positions_n": 0}, None)
+                days = store.recent_days(conn, "20261125", 5)
+                w = store.weekly(conn, "20261125", 5)
+            finally:
+                conn.close()
+        self.assertEqual([d["date"] for d in days], ["20261123", "20261124", "20261125"])
+        self.assertEqual(w["days"], 3)
+        self.assertAlmostEqual(w["ret"], 0.034576, places=6)
+        self.assertEqual(w["top_sectors"][0]["name"], "固体电池")
+
+    def test_render_html_has_charts_and_url(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "board.db"
+            site = Path(td) / "site"
+            site.mkdir()
+            params = load_params(profile="balanced")
+            params.runtime["board"] = {"enabled": True, "store_db": str(db),
+                                       "site_dir": str(site),
+                                       "base_url": "https://example.test/board-x/"}
+            conn = store.connect(db)
+            try:
+                store.seed_equity(conn, [{"date": "20261124", "equity": 1000000,
+                                          "ret": 0, "cash": 1, "mv": 0}])
+            finally:
+                conn.close()
+            url = wb.publish(self._data(), {"equity": 1034576, "day_ret": 0.0007,
+                                            "cash": 1034576, "mv": 0, "positions_n": 0,
+                                            "equity_history": [
+                                                {"date": "20261124", "equity": 1000000,
+                                                 "ret": 0, "cash": 1, "mv": 0}]},
+                             {"for_date": "20261126", "state": "CRASH",
+                              "allow_new": False, "candidates": []}, params)
+            self.assertEqual(url, "https://example.test/board-x/d/20261125.html")
+            page = (site / "d" / "20261125.html").read_text(encoding="utf-8")
+            self.assertTrue((site / "index.html").exists())
+            self.assertTrue((site / "weekly.html").exists())
+            self.assertTrue((Path(td) / "board" / "20261125.json").exists())
+        self.assertIn("常规量价模拟盘", page)
+        self.assertIn("<svg", page)              # 净值/宽度曲线
+        self.assertIn("bar-fill", page)          # 资金条形图
+        self.assertIn("固体电池", page)
+        self.assertIn("viewport", page)
+
+    def test_spark_and_bars_helpers(self):
+        self.assertIn("<polyline", wb.svg_spark([1, 2, 3]))
+        self.assertIn("暂无数据", wb.css_bars([]))
+        out = wb.css_bars([{"label": "A", "value": 1, "text": "+1"}])
+        self.assertIn("bar-fill", out)
+        self.assertIn("A", out)
 
 
 if __name__ == "__main__":

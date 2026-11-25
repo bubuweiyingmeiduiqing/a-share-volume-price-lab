@@ -29,3 +29,6 @@ z 说交易/
 
 # local GitHub CLI auth (contains a token; never commit)
 .gh-config/
+
+# 投研团队工作区（独立项目，不进模拟盘仓库）
+投研团队/

@@ -33,6 +33,7 @@ from pathlib import Path
 import pandas as pd
 
 import board as bd
+import webboard as wb
 import data as dm
 import indicators as ind
 import portfolio as pf
@@ -340,24 +341,19 @@ def _review_section(date: str, market: dm.MarketData, params, res, acct: dict,
     return L
 
 
-def _board_lines(name: str, fn) -> list[str]:
-    """看板某一节失败只跳过该节，不能让收盘日报整体失败。"""
-    try:
-        return list(fn())
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] 看板「{name}」生成失败：{e}")
-        return []
-
-
 def build_report(date: str, market: dm.MarketData, params, res, acct: dict,
                  plan: dict, fills: list[dict], settle_ev: list[dict], m: dict,
                  prev_plan: dict | None = None, state_dir: Path | None = None,
-                 report_dir: Path | None = None) -> str:
+                 report_dir: Path | None = None, board_data: dict | None = None,
+                 board_url: str | None = None) -> str:
     s = pf.stats(acct)
     total_ret = m["equity"] / float(acct["initial"]) - 1
     eq = m["equity"]
 
     L = [f"## {params.rt('push', 'title_prefix', default='常规量价模拟盘')} {dm.dash(date)}", ""]
+    if board_url:
+        L.append(f"> 📊 手机看板：{board_url}")
+        L.append("")
     if market.source == "synthetic":
         L.append("> ⚠️ 合成数据演示，不是真实行情；只用于验证规则。")
         L.append("")
@@ -369,9 +365,8 @@ def build_report(date: str, market: dm.MarketData, params, res, acct: dict,
     L.append("温度分解：" + " / ".join(
         f"{k} {v:.0%}" for k, v in res.parts.items()))
     L.append("")
-    if bd.enabled_for(market, params):
-        L.extend(_board_lines("大盘环境",
-                              lambda: bd.index_section(market, date, params, res)))
+    parts = bd.render(board_data, res) if board_data else {}
+    L.extend(parts.get("index") or [])
 
     L.append(f"**账户**：净值 **{_fmt_money(eq)}**"
              f"（当日 {m['day_ret']:+.2%}，累计 {total_ret:+.2%}）")
@@ -417,10 +412,8 @@ def build_report(date: str, market: dm.MarketData, params, res, acct: dict,
                  f"持 {pf._hold_days(p['entry_date'], date)} 天 | 止损 {p['stop']:.2f}")
     L.append("")
 
-    if bd.enabled_for(market, params):
-        L.extend(_board_lines("板块资金", lambda: bd.sector_section(date, params)))
-        L.extend(_board_lines("龙头筛选",
-                              lambda: bd.leader_section(market, date, params, plan)))
+    L.extend(parts.get("sectors") or [])
+    L.extend(parts.get("leaders") or [])
 
     L.append(f"**明日计划**（{dm.dash(plan.get('for_date')) if plan.get('for_date') else '待定'}）")
     L.append(f"当前状态「{res.state_cn}」→ "
@@ -505,6 +498,39 @@ def run(date: str | None = None, do_push: bool = True, params=None,
     plan = stg.build_plan(market, res, params)
     plan["for_date"] = nxt
 
+    # 5b) 收盘研究看板：先落库/出网页，再把链接写进日报与推送
+    board_data: dict = {}
+    board_url: str | None = None
+    if bd.enabled_for(market, params):
+        try:
+            board_data = bd.collect(market, date, params, res, plan)
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 看板数据采集失败：{e}")
+            board_data = {}
+    if board_data:
+        board_data["trades"] = [
+            {"code": x.get("code"), "name": x.get("name"), "action": x.get("action"),
+             "price": x.get("price"), "reason": x.get("reason"), "ret": x.get("ret"),
+             "setup": x.get("setup")}
+            for x in list(fills) + list(settle_ev)
+            if x.get("action") in ("买入", "卖出", "减半")]
+        board_data["positions"] = [
+            {"code": p["code"], "name": p["name"], "setup": p.get("setup"),
+             "entry_price": p["entry_price"], "last_close": p.get("last_close"),
+             "ret": (p.get("last_close", p["entry_price"]) / p["entry_price"] - 1),
+             "stop": p.get("stop"),
+             "hold_days": pf._hold_days(p["entry_date"], date)}
+            for p in acct["positions"]]
+        try:
+            board_url = wb.publish(
+                board_data,
+                {"equity": m["equity"], "day_ret": m["day_ret"], "cash": m["cash"],
+                 "mv": m["mv"], "positions_n": len(acct["positions"]),
+                 "equity_history": acct.get("equity_history") or []},
+                plan, params)
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 看板发布失败：{e}")
+
     acct["last_run"] = date
     rg.save(reg, reg_path)
     pf.save(acct, acct_path)
@@ -512,7 +538,8 @@ def run(date: str | None = None, do_push: bool = True, params=None,
 
     report = build_report(date, market, params, res, acct, plan, fills, settle_ev, m,
                           prev_plan=prev_plan, state_dir=state_dir,
-                          report_dir=report_dir)
+                          report_dir=report_dir, board_data=board_data,
+                          board_url=board_url)
     (report_dir / f"{dm.dash(date)}.md").write_text(report, encoding="utf-8")
     print(report)
 

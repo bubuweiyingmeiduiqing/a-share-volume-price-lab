@@ -272,6 +272,48 @@ deploy/regular_paper/
 
 ---
 
+## 数据落库与手机看板（2026-11-25 增加）
+
+### 每天存两份，格式不同、用途不同
+
+| 位置 | 格式 | 用途 |
+|---|---|---|
+| `state/board.db` | SQLite（`days` / `indices` / `sectors` / `watch` / `leaders` / `trades` / `positions` / `meta`） | 每周复盘、新功能直接 SQL 查；主键 `(date, key)`，同一天重跑只覆盖不重复 |
+| `state/board/<YYYYMMDD>.json` | JSON（`board.collect()` 的原始结构） | 回放、字段演进、搬运；字段改名前的历史也能读 |
+
+约定：日期一律 `TEXT 'YYYYMMDD'`；资金单位亿元；`*_pct` 是百分数、`day_ret` 是小数（与 `account.json` 一致）。
+表结构变更必须走 `store.SCHEMA_VERSION` + 迁移，不要手改线上库。
+
+常用查询（每周复盘底稿就靠这些）：
+
+```sql
+-- 一周净值与宽度
+SELECT date, equity, day_ret, pool_above5, up, down FROM days ORDER BY date DESC LIMIT 5;
+-- 一周板块资金累计
+SELECT name, SUM(f5) FROM sectors WHERE date >= '20261121' GROUP BY name ORDER BY 2 DESC LIMIT 10;
+-- 龙头候选与计划命中
+SELECT date, code, name, ratio, in_plan FROM leaders WHERE date >= '20261121' ORDER BY date, score DESC;
+```
+
+### 手机看板（推送里的链接）
+
+收盘跑完会把看板渲染成静态网页，并用 nginx 出到：
+
+```
+https://linsey.43.153.144.97.nip.io/board-<token>/
+  ├─ index.html          最新一天
+  ├─ d/<YYYYMMDD>.html   每天归档（推送里给的就是这个链接，回看不会变）
+  └─ weekly.html         最近 5 个交易日的复盘底稿
+```
+
+- 推送正文顶部会带一行 `📊 手机看板：<url>`；
+- 页面按手机竖屏设计（`max-width: 440px`），微信内置浏览器直接打开，不依赖 CDN/JS：
+  净值曲线、5 日线宽度趋势是内联 SVG，板块/龙头/观察清单是 CSS 条形图；
+- 单独补渲染某一天（不动交易 state）：`python3 webboard.py --date 20261125`；
+  只重渲染已存数据：`python3 webboard.py --date 20261125 --no-fetch`。
+
+---
+
 ## 已知限制
 
 1. **日线代理“冲高回落”**：抓不到 9:45 前的分时诱多，只能用长上影+放量+收盘回落代理。
