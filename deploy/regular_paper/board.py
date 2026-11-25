@@ -225,12 +225,13 @@ def index_section(market: dm.MarketData, date: str, params, res=None) -> list[st
 # 二、板块资金扫描
 # ---------------------------------------------------------------------------
 
-def _sector_frame() -> pd.DataFrame:
-    """同花顺概念板块：即时资金 + 5 日资金，按板块名合并。"""
-    now = ak.stock_fund_flow_concept(symbol="即时")
-    d5 = ak.stock_fund_flow_concept(symbol="5日排行")
+def _ths_frame(kind: str = "概念") -> pd.DataFrame:
+    """同花顺板块资金：即时 + 5 日，按板块名合并（概念/行业两套口径）。"""
+    fn = ak.stock_fund_flow_concept if kind == "概念" else ak.stock_fund_flow_industry
+    now = fn(symbol="即时")
+    d5 = fn(symbol="5日排行")
     if now is None or now.empty or d5 is None or d5.empty:
-        raise RuntimeError("同花顺概念资金流返回空")
+        raise RuntimeError(f"同花顺{kind}资金流返回空")
     now = now.copy()
     d5 = d5.copy()
     now["行业"] = now["行业"].astype(str)
@@ -260,22 +261,48 @@ def sector_tag(r) -> str:
     return "观察"
 
 
+def _watch_rows(watch: list[str], concept: pd.DataFrame) -> list[tuple[str, object]]:
+    """观察清单先按概念板块匹配，匹配不到再退同花顺行业（银行/白酒这类在行业表里）。"""
+    rows: list[tuple[str, object]] = []
+    missing: list[str] = []
+    for w in watch:
+        sub = concept[concept["行业"] == w]
+        if len(sub):
+            rows.append((w, sub.iloc[0]))
+        else:
+            missing.append(w)
+    if missing:
+        try:
+            ind = _ths_frame("行业")
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 同花顺行业资金流不可用：{e}")
+            return rows
+        for w in missing:
+            sub = ind[ind["行业"] == w]
+            if len(sub):
+                rows.append((w, sub.iloc[0]))
+    return rows
+
+
 def sector_section(date: str, params) -> list[str]:
     try:
-        m = _sector_frame()
+        m = _ths_frame("概念")
     except Exception as e:  # noqa: BLE001
         print(f"[warn] 板块资金扫描不可用：{e}")
         return ["**板块资金扫描**", "- 同花顺板块资金流不可用，本节跳过（不影响交易计划）。", ""]
 
-    early = int(((m["f5"] > 0) & (m["f1"] > 0) & (m["chg"] > 0)).sum())
-    strict = int(((m["f5"] > 0) & (m["f1"] > 0) & (m["chg"] >= 1.0)
-                  & (m["chg5"] >= 3.0)).sum())
+    m["repair"] = (m["f5"] > 0) & (m["f1"] > 0) & (m["chg"] > 0)
+    m["strict"] = m["repair"] & (m["chg"] >= 1.0) & (m["chg5"] >= 3.0)
+    early = int(m["repair"].sum())
+    strict = int(m["strict"].sum())
     top_n = int(params.rt("board", "top_sectors", default=6))
-    top = m.sort_values("score", ascending=False).head(top_n)
+    # 早期修复通道优先（同看板口径），不足 top_n 再用其余板块按分数补齐
+    top = pd.concat([m[m["repair"]].sort_values("score", ascending=False),
+                     m[~m["repair"]].sort_values("score", ascending=False)]).head(top_n)
 
     L = ["**板块资金扫描**（同花顺概念，按 5 日资金/强度打分）"]
     L.append(f"- 样本 {len(m)} 个概念板块：符合早期修复条件 {early} 个，"
-             f"符合严格趋势延续条件 {strict} 个")
+             f"符合严格趋势延续条件 {strict} 个（下表早期修复优先，不足再按分数补齐）")
     L.append("")
     L.append("| 排名 | 板块 | 5日资金 | 今日资金 | 归一化资金 | 今日涨跌 | 5日涨跌 | 标签 |")
     L.append("|---|---|---|---|---|---|---|---|")
@@ -286,8 +313,7 @@ def sector_section(date: str, params) -> list[str]:
 
     # 新旧力量对比：固定观察清单，按资金方向分组，便于一眼看出风格切换
     watch = params.rt("board", "watch_sectors", default=DEFAULT_WATCH) or []
-    hit = [(w, m[m["行业"] == w]) for w in watch]
-    hit = [(w, sub.iloc[0]) for w, sub in hit if len(sub)]
+    hit = _watch_rows([str(w) for w in watch], m)
     if hit:
         L.append("")
         L.append("- 新旧力量对比：" + "；".join(
