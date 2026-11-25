@@ -140,16 +140,20 @@ def evaluate(market: dm.MarketData, params, prev_state: str | None = None,
 
     reasons: list[str] = []
     crash = False
+    crash_tags: list[str] = []
     if m["day_pct"] <= -float(params.get("timing.crash_day")):
         crash = True
+        crash_tags.append("单日大跌")
         reasons.append(f"指数单日 {m['day_pct']:+.2%} ≤ -{params.get('timing.crash_day'):.1%}")
     if (m["ret5"] <= -float(params.get("timing.crash_ret5"))
             and m["amount_ratio"] >= float(params.get("timing.crash_vol"))):
         crash = True
+        crash_tags.append("5 日放量下跌")
         reasons.append(f"5 日 {m['ret5']:+.2%} 且量比 {m['amount_ratio']:.2f} 放量")
     if (m["close"] < m["ma_slow"] and m["ma_slow_slope"] < 0
             and m["above_ma20"] < 0.35):
         crash = True
+        crash_tags.append("跌破 MA60 且宽度 <35%")
         reasons.append("指数在 MA60 下方、MA60 下压且宽度 <35%")
 
     washout = (
@@ -179,7 +183,9 @@ def evaluate(market: dm.MarketData, params, prev_state: str | None = None,
 
     if crash:
         proposed = "CRASH"
-        reasons.append("放量急跌 → 清仓")
+        # 文案要指出真正的触发条件：2026-11-25 是“破 MA60+宽度<35%”，
+        # 旧文案一律写“放量急跌”，量比 0.95 时看起来很矛盾。
+        reasons.append(f"清仓：{'、'.join(crash_tags) or '急跌'}")
     elif hot:
         proposed = "HOT"
         reasons.append(f"市场过热（温度 {heat:.0f}，20 日 {m['ret20']:+.1%}）")

@@ -355,7 +355,7 @@ def leader_frame(market: dm.MarketData, date: str) -> pd.DataFrame:
     if m.empty:
         raise RuntimeError("扫描池与个股资金流无交集")
     m["name"] = [market.meta.get(c, {}).get("name", "") for c in m["code"]]
-    m["industry"] = [market.meta.get(c, {}).get("industry", "") or "未分类"
+    m["industry"] = [market.meta.get(c, {}).get("industry", "") or ""
                      for c in m["code"]]
     m["mv"] = [float(market.meta.get(c, {}).get("float_mv", 0) or 0) / 1e8
                for c in m["code"]]

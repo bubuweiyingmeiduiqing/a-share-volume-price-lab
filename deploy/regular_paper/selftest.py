@@ -145,6 +145,9 @@ class RegularPaperTest(unittest.TestCase):
         self.assertEqual(r.state, "CRASH")
         self.assertFalse(r.allow_new)
         self.assertEqual(r.cap, 0.0)
+        # 文案必须指出真正的触发条件，不能一律写“放量急跌”
+        self.assertTrue(any("清仓：" in x for x in r.reasons), r.reasons)
+        self.assertTrue(any("单日大跌" in x for x in r.reasons), r.reasons)
 
     def test_index_washout_not_crash(self):
         idx = self.market.index.copy()
