@@ -644,7 +644,7 @@ def _sina_index_klines(symbol: str, need: int) -> pd.DataFrame:
 
 
 def _index_hist(symbol: str, end: str, need: int) -> pd.DataFrame:
-    """指数日线多源抓取：东财 → 新浪 → 腾讯，取第一个响应的源。"""
+    """指数日线多源抓取：新浪 K 线 → 东财日线 → 东财 K 线 → 腾讯，取第一个响应的源。"""
     import akshare as ak
     start = (dt.date.today() - dt.timedelta(days=need * 2 + 120)).strftime("%Y%m%d")
     code = _index_code(symbol)
@@ -680,8 +680,10 @@ def _index_hist(symbol: str, end: str, need: int) -> pd.DataFrame:
         raw["换手率"] = 0.0
         return _normalize_hist(raw)
 
-    for name, fn in (("东财日线", em_hist), ("东财K线", em_kline),
-                     ("新浪K线", sina_kline), ("腾讯日线", tx_hist)):
+    # 新浪 K 线放第一个：单请求、无 JS 解密，16:20 收盘后基本已含当日；
+    # 东财两个接口在 VPS 上经常不是“拒连”而是“挂住”，排在前面会白等 1-3 分钟。
+    for name, fn in (("新浪K线", sina_kline), ("东财日线", em_hist),
+                     ("东财K线", em_kline), ("腾讯日线", tx_hist)):
         try:
             df = fn()
         except Exception as e:  # noqa: BLE001
