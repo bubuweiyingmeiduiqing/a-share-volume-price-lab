@@ -120,12 +120,13 @@ STYLE = """
 body{margin:0;background:var(--bg);color:var(--ink);
 font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,sans-serif;
 -webkit-text-size-adjust:100%%}
-.wrap{max-width:440px;margin:0 auto;padding:12px 12px 28px}
+.wrap{max-width:440px;margin:0 auto;padding:12px 12px 28px;overflow-x:hidden}
 .card{background:var(--card);border-radius:14px;padding:14px;margin:10px 0;
 box-shadow:0 1px 2px rgba(16,24,40,.04)}
 h1{font-size:19px;margin:2px 0 6px}
-h2{font-size:15px;margin:0 0 10px;display:flex;justify-content:space-between;align-items:baseline}
-h2 .h2r{font-size:12px;color:var(--muted);font-weight:400}
+h2{font-size:15px;margin:0 0 10px;display:flex;justify-content:space-between;
+align-items:baseline;gap:8px;flex-wrap:wrap}
+h2 .h2r{font-size:12px;color:var(--muted);font-weight:400;min-width:0}
 .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
 .chip{font-size:12px;padding:3px 9px;border-radius:999px;background:#eef2ff;color:#3452c8}
 .chip.warn{background:#fff3e6;color:#a35200}
@@ -144,8 +145,9 @@ tr:last-child td{border-bottom:none}
 .spark.sm{height:44px}
 .hint{color:var(--muted);font-size:13px;margin:6px 0 0}
 .bars{margin-top:2px}
-.bar-row{display:grid;grid-template-columns:96px 1fr 74px;gap:6px;align-items:center;
-padding:3px 0;font-size:13px}
+.bar-row{display:grid;grid-template-columns:104px minmax(0,1fr) 70px;gap:6px;
+align-items:center;padding:3px 0;font-size:13px}
+.bar-row>*{min-width:0}
 .bar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bar-sub{display:block;font-size:11px;color:var(--muted)}
 .bar-track{background:#f0f1f5;border-radius:4px;height:12px;position:relative;overflow:hidden}
@@ -233,9 +235,9 @@ def _market_card(data: dict, days: list[dict]) -> str:
     if len(width) >= 2:
         trend = ('<h2 style="margin-top:14px">5 日线宽度<span class="h2r">'
                  f'近 {len(width)} 个交易日</span></h2>' + svg_spark(width, color="#7a5af8"))
-    scope = "" if (mk.get("n") or 0) >= 4000 else f'（截断快照 {mk.get("n")} 只）'
-    return (f'<div class="card"><h2>全市场<span class="h2r">{_esc(mk.get("limit_src") or "")}'
-            f'{scope}</span></h2><div class="kpis">{cards}</div>{trend}</div>')
+    scope = f'沪深 {mk.get("n")} 只' if (mk.get("n") or 0) >= 4000 else f'截断快照 {mk.get("n")} 只'
+    return (f'<div class="card"><h2>全市场<span class="h2r">{scope}</span></h2>'
+            f'<div class="kpis">{cards}</div>{trend}</div>')
 
 
 def _indices_card(data: dict) -> str:
@@ -263,13 +265,19 @@ def _sector_card(data: dict) -> str:
         return ('<div class="card"><h2>板块资金</h2>'
                 '<p class="hint">同花顺板块资金流本次不可用，本节跳过。</p></div>')
     if not rows:
-        note = stats.get("note") or "今日没有板块通过早期修复条件"
+        # 没有板块过早期修复门槛时，用“今日资金最强”的图顶上，别让整块空着
+        allsec = sorted((data.get("sectors_all") or []), key=lambda r: -float(r.get("f1") or 0))
+        items = [{"label": r["name"], "value": r["f1"],
+                  "text": _signed(r["f1"], 1, "亿"), "tone": _tone(r["f1"]),
+                  "sub": f'5日 {_signed(r["f5"], 1)}亿 · {r.get("tag") or ""}'}
+                 for r in allsec[:8]]
         return (f'<div class="card"><h2>板块资金<span class="h2r">'
-                f'{_esc(stats.get("n") or 0)} 个概念板块</span></h2>'
-                f'<p class="hint">{_esc(note)}</p></div>')
+                f'{stats.get("n", len(allsec))} 个概念 · 今日资金最强</span></h2>'
+                f'<p class="hint">今日没有板块通过早期修复条件（5 日+今日资金双流入且上涨），'
+                f'下面是今日净流入前 8。</p>{css_bars(items)}</div>')
     items = [{"label": r["name"], "value": r["f1"],
               "text": _signed(r["f1"], 1, "亿"), "tone": _tone(r["f1"]),
-              "sub": f'5日 {_signed(r["f5"], 1)} 亿 · {r["tag"]}'}
+              "sub": f'5日 {_signed(r["f5"], 1)}亿 · {r["tag"]}'}
              for r in rows[:10]]
     return (f'<div class="card"><h2>板块资金<span class="h2r">'
             f'{stats.get("n", 0)} 个概念 · 早期修复 {stats.get("early", 0)}</span></h2>'
@@ -283,7 +291,7 @@ def _watch_card(data: dict) -> str:
         return ""
     items = [{"label": r["name"], "value": r["f1"],
               "text": _signed(r["f1"], 1, "亿"), "tone": _tone(r["f1"]),
-              "sub": f'5日 {_signed(r["f5"], 1)} 亿 · {_pct(r.get("chg"))}'}
+              "sub": f'5日 {_signed(r["f5"], 1)}亿 / {_pct(r.get("chg"), 1)}'}
              for r in rows[:8]]
     return f'<div class="card"><h2>新旧力量对比<span class="h2r">今日净流入</span></h2>{css_bars(items)}</div>'
 
@@ -295,7 +303,7 @@ def _leader_card(data: dict) -> str:
     items = [{"label": f'{r["name"]}',
               "value": r["ratio"], "text": _signed(r["ratio"], 2, "%"),
               "tone": _tone(r["ratio"]),
-              "sub": f'5日 {_signed(r["f5"], 1)}亿 · 涨 {_pct(r["chg5"])}'}
+              "sub": f'5日 {_signed(r["f5"], 1)}亿 / {_pct(r["chg5"], 1)}'}
              for r in rows[:8]]
     return (f'<div class="card"><h2>核心龙头<span class="h2r">5 日资金 / 流通市值</span></h2>'
             f'{css_bars(items)}<p class="hint">研究候选，不是成交信号；只有「明日计划」里的候选才成交。</p></div>')
@@ -467,12 +475,14 @@ def main(argv: list[str] | None = None) -> int:
     params = load_params()
     date = dm.norm_date(a.date) if a.date else dm.latest_trade_date(None)
 
+    import json
     if a.no_fetch:
         js = Path(__file__).resolve().parent / "state" / "board" / f"{date}.json"
-        import json
         data = json.loads(js.read_text(encoding="utf-8"))
         acct = pf.load(params)
-        plan = None
+        plan_p = Path(__file__).resolve().parent / "state" / "plan.json"
+        plan = (json.loads(plan_p.read_text(encoding="utf-8"))
+                if plan_p.exists() else None)
         url = publish(data, acct, plan, params)
         print(data and (url or "已渲染（未配置看板 URL）"))
         return 0
@@ -481,7 +491,6 @@ def main(argv: list[str] | None = None) -> int:
     reg = rg.load(Path(__file__).resolve().parent / "state" / "regime.json")
     res = rg.evaluate(market, params, reg.get("state"), int(reg.get("dwell") or 0))
     acct = pf.load(params)
-    import json
     plan_p = Path(__file__).resolve().parent / "state" / "plan.json"
     plan = json.loads(plan_p.read_text(encoding="utf-8")) if plan_p.exists() else None
     data = bd.collect(market, date, params, res, plan)
