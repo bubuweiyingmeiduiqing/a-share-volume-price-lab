@@ -327,12 +327,13 @@ def sector_data(params) -> dict:
 
 
 def sector_lines(data: dict) -> list[str]:
-    if data.get("error"):
+    if data.get("sector_error") or data.get("error"):
         return ["**板块资金扫描**", "- 同花顺板块资金流不可用，本节跳过（不影响交易计划）。", ""]
+    st = data.get("sector_stats") or {}
     rows = data.get("sectors") or []
     L = ["**板块资金扫描**（同花顺概念，按 5 日资金/强度打分）"]
-    L.append(f"- 样本 {data.get('n', 0)} 个概念板块：符合早期修复条件 "
-             f"{data.get('early', 0)} 个，符合严格趋势延续条件 {data.get('strict', 0)} 个")
+    L.append(f"- 样本 {st.get('n', 0)} 个概念板块：符合早期修复条件 "
+             f"{st.get('early', 0)} 个，符合严格趋势延续条件 {st.get('strict', 0)} 个")
     L.append("")
     if not rows:
         strong = sorted((data.get("sectors_all") or []), key=lambda r: -r["f1"])[:2]
@@ -429,7 +430,7 @@ def leader_data(market: dm.MarketData, date: str, params,
 
 
 def leader_lines(data: dict) -> list[str]:
-    if data.get("error"):
+    if data.get("leader_error") or data.get("error"):
         return ["**核心龙头筛选**", "- 个股资金流不可用，本节跳过（不影响交易计划）。", ""]
     rows = data.get("leaders") or []
     if not rows:
@@ -484,14 +485,27 @@ def collect(market: dm.MarketData, date: str, params, res=None,
         print(f"[warn] 看板「大盘环境」生成失败：{e}")
     if not data["historical"]:
         try:
-            data.update(sector_data(params))
+            sd = sector_data(params)
         except Exception as e:  # noqa: BLE001
             print(f"[warn] 看板「板块资金」生成失败：{e}")
-            data.update({"error": str(e)})
+            sd = {"error": str(e)}
+        if sd.get("error"):
+            data["sector_error"] = sd["error"]
+            data["sector_stats"] = {}
+        else:
+            data["sector_stats"] = {k: sd[k] for k in ("n", "early", "strict")}
+        data["sectors"] = sd.get("sectors") or []
+        data["sectors_all"] = sd.get("sectors_all") or []
+        data["watch"] = sd.get("watch") or []
         try:
-            data.update(leader_data(market, date, params, plan))
+            ld = leader_data(market, date, params, plan)
         except Exception as e:  # noqa: BLE001
             print(f"[warn] 看板「龙头筛选」生成失败：{e}")
+            ld = {"error": str(e)}
+        if ld.get("error"):
+            data["leader_error"] = ld["error"]
+        data["leaders"] = ld.get("leaders") or []
+        data["leaders_all"] = ld.get("leaders_all") or []
     return data
 
 
@@ -519,11 +533,20 @@ def index_section(market, date, params, res=None) -> list[str]:
 
 
 def sector_section(date, params) -> list[str]:
-    return sector_lines(sector_data(params))
+    sd = sector_data(params)
+    if sd.get("error"):
+        return sector_lines({"sector_error": sd["error"]})
+    return sector_lines({"sector_stats": {k: sd[k] for k in ("n", "early", "strict")},
+                         "sectors": sd.get("sectors") or [],
+                         "sectors_all": sd.get("sectors_all") or [],
+                         "watch": sd.get("watch") or []})
 
 
 def leader_section(market, date, params, plan: dict | None = None) -> list[str]:
-    return leader_lines(leader_data(market, date, params, plan))
+    ld = leader_data(market, date, params, plan)
+    if ld.get("error"):
+        return leader_lines({"leader_error": ld["error"]})
+    return leader_lines(ld)
 
 
 def build(market: dm.MarketData, date: str, params, res=None,

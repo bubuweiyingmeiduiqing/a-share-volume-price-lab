@@ -789,6 +789,7 @@ class BoardStoreTest(unittest.TestCase):
             "market": {"amount_yi": 8988.0, "n": 799, "up": 105, "down": 689,
                        "zt": 51, "dt": 45, "limit_src": "快照", "pool_n": 300,
                        "pool_above5": 30.0},
+            "sector_stats": {"n": 387, "early": 1, "strict": 1},
             "sectors": [{"name": "固体电池", "f5": 12.5, "f1": 3.2, "norm5": 0.28,
                          "chg": 1.2, "chg5": 4.4, "n": 45, "score": 88.0,
                          "tag": "早期修复", "repair": True, "rank": 1}],
@@ -884,6 +885,8 @@ class BoardStoreTest(unittest.TestCase):
         self.assertIn("<svg", page)              # 净值/宽度曲线
         self.assertIn("bar-fill", page)          # 资金条形图
         self.assertIn("固体电池", page)
+        self.assertIn("387 个概念", page)
+        self.assertIn("早期修复 1", page)
         self.assertIn("viewport", page)
 
     def test_spark_and_bars_helpers(self):

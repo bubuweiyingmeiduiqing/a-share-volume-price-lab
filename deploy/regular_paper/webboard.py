@@ -226,7 +226,8 @@ def _market_card(data: dict, days: list[dict]) -> str:
     ]
     cards = "".join(
         f'<div class="kpi"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>'
-        f'<div class="k">{_esc(sub)}</div></div>' for k, v, sub in kpis)
+        + (f'<div class="k">{_esc(sub)}</div>' if sub else '')
+        + '</div>' for k, v, sub in kpis)
     width = [d.get("pool_above5") for d in days if d.get("pool_above5") is not None]
     trend = ""
     if len(width) >= 2:
@@ -258,6 +259,9 @@ def _indices_card(data: dict) -> str:
 def _sector_card(data: dict) -> str:
     stats = data.get("sector_stats") or {}
     rows = data.get("sectors") or []
+    if data.get("sector_error"):
+        return ('<div class="card"><h2>板块资金</h2>'
+                '<p class="hint">同花顺板块资金流本次不可用，本节跳过。</p></div>')
     if not rows:
         note = stats.get("note") or "今日没有板块通过早期修复条件"
         return (f'<div class="card"><h2>板块资金<span class="h2r">'
@@ -267,8 +271,9 @@ def _sector_card(data: dict) -> str:
               "text": _signed(r["f1"], 1, "亿"), "tone": _tone(r["f1"]),
               "sub": f'5日 {_signed(r["f5"], 1)} 亿 · {r["tag"]}'}
              for r in rows[:10]]
-    return (f'<div class="card"><h2>板块资金<span class="h2r">今日净流入 · '
-            f'早期修复 {stats.get("early", 0)} 个</span></h2>{css_bars(items)}'
+    return (f'<div class="card"><h2>板块资金<span class="h2r">'
+            f'{stats.get("n", 0)} 个概念 · 早期修复 {stats.get("early", 0)}</span></h2>'
+            f'{css_bars(items)}'
             f'<p class="hint">归一化资金 = 5日净额 ÷ 板块公司家数；标签由资金与涨跌组合判定。</p></div>')
 
 
@@ -321,10 +326,15 @@ def _trades_card(data: dict) -> str:
     if not trades and not pos:
         return ('<div class="card"><h2>今日成交</h2>'
                 '<p class="hint">无成交，空仓。</p></div>')
-    rows = "".join(
-        f'<div class="stat"><span>{_esc(t.get("action"))} {_esc(t.get("name"))}</span>'
-        f'<b class="{_tone((t.get("ret") or 0) * 100)}">{_pct((t.get("ret") or 0) * 100)}</b></div>'
-        for t in trades[:8])
+    def _t_row(t):
+        ret = t.get("ret")
+        val = (_pct(float(ret) * 100) if ret is not None else
+               _num(t.get("price")))
+        tone = _tone(float(ret) * 100 if ret is not None else None)
+        return (f'<div class="stat"><span>{_esc(t.get("action"))} {_esc(t.get("name"))}'
+                f'{(" · " + _esc(t.get("reason"))) if t.get("reason") else ""}</span>'
+                f'<b class="{tone}">{val}</b></div>')
+    rows = "".join(_t_row(t) for t in trades[:8])
     holds = "".join(
         f'<div class="stat"><span>{_esc(p.get("name"))} 持 {p.get("hold_days") or 0} 天</span>'
         f'<b class="{_tone((p.get("ret") or 0) * 100)}">{_pct((p.get("ret") or 0) * 100)}</b></div>'
@@ -477,6 +487,16 @@ def main(argv: list[str] | None = None) -> int:
     data = bd.collect(market, date, params, res, plan)
     data["regime"] = {"state": res.state, "cn": res.state_cn, "heat": res.heat,
                       "cap": res.cap, "allow_new": res.allow_new, "dwell": res.dwell}
+    data["trades"] = [
+        {"code": t.get("code"), "name": t.get("name"), "action": "卖出",
+         "price": t.get("exit_price"), "reason": t.get("reason"),
+         "ret": t.get("ret"), "setup": t.get("setup")}
+        for t in (acct.get("trades") or []) if str(t.get("date")) == date]
+    data["trades"] += [
+        {"code": p["code"], "name": p["name"], "action": "买入",
+         "price": p["entry_price"], "reason": None, "ret": None,
+         "setup": p.get("setup")}
+        for p in acct["positions"] if str(p.get("entry_date")) == date]
     data["positions"] = [
         {"code": p["code"], "name": p["name"], "setup": p.get("setup"),
          "entry_price": p["entry_price"], "last_close": p.get("last_close"),
