@@ -47,18 +47,23 @@ git add -A
 git commit -m "..."
 git push origin main
 
-# 3) 在 VPS 的仓库 clone 里部署指定 commit
+# 3) VPS 侧：默认不用管
+#    每交易日 08:45 / 15:45，cron 跑 ~/a-share-volume-price-lab/deploy/sync_from_github.sh，
+#    自动 git fetch → 比对运行目录清单 → 落后才部署（自检 + 备份 + 回滚 + 写清单）。
+#
+# 需要立刻生效时（例如盘中要修东西），在 VPS 的仓库 clone 里手动跑同一个脚本：
 ssh vps
 cd ~/a-share-volume-price-lab
-git pull --ff-only
-./deploy/deploy_vps.sh --app regular --commit origin/main
-# 打板版：
-./deploy/deploy_vps.sh --app daban --commit origin/main
-# 或两个一起：
-./deploy/deploy_vps.sh --app all --commit origin/main
+./deploy/sync_from_github.sh                 # 两个运行目录都对齐 origin/main
+./deploy/sync_from_github.sh --app regular   # 只同步常规版
+./deploy/sync_from_github.sh --dry-run       # 只报告要做什么
 ```
 
-部署脚本会：
+> `sync_from_github.sh` 是幂等的：运行目录清单里的 commit 已经等于 `origin/main`
+> 就只打一行日志直接退出，不会重复 rsync、不会重复自检。
+> 底层仍然是 `deploy_vps.sh`，所以“只允许 origin/main 上的 commit”这条约束不变。
+
+`deploy_vps.sh` 会：
 
 1. `git fetch` 并校验 commit **在 `origin/main` 上**；
 2. `git archive` 到临时目录，先 `py_compile`，再跑 `selftest.py`；
@@ -125,6 +130,27 @@ cd ~/a-share-volume-price-lab
 
 ---
 
+## 5.1 自动同步（2026-11-25 起）
+
+VPS 不再依赖“某人记得去 ssh 部署”，而是一个幂等的同步脚本 + 两条 cron：
+
+```bash
+# crontab -l | grep deploy-sync
+45 8  * * 1-5  cd ~/a-share-volume-price-lab && flock -n ~/.local/state/kai/locks/deploy-sync.lock \
+               timeout -k 15s 20m bash deploy/sync_from_github.sh >> ~/deploy-sync.log 2>&1
+45 15 * * 1-5  （同上）
+```
+
+- 08:45 保证 09:15 盘前跑的是 GitHub 最新代码；15:45 保证 16:10 / 16:20 收盘跑的是同一份；
+- 同步失败（网络、自检不过、import 检查失败）只写日志并保留旧代码，不会半途覆盖；
+- `deploy_vps.sh` 里的 `selftest.py` 是硬门槛：自检不过就不会 rsync；
+- 运行目录的清单 commit 与 `origin/main` 不一致时，`status.py` / `watchdog.py` 会暴露出来。
+
+要“冻结”某个版本，临时 `crontab -e` 注释掉这两行，或把 clone 切到旧 commit 并暂停同步；
+回滚仍按第 4 节部署旧 commit。
+
+---
+
 ## 6. 为什么这样做
 
 - 线上问题能精确定位到 commit，而不是“某次 ssh 改的那一行”；
@@ -141,3 +167,5 @@ cd ~/a-share-volume-price-lab
 - 打板版：`~/daban_paper`，由 `deploy_vps.sh --app daban` 部署；
 - 定时任务仍由 VPS crontab 管理（09:15 盘前 / 16:20 收盘 / 17:10 体检），
   部署脚本不改 crontab。
+- 代码同步：每交易日 08:45 / 15:45 由 `deploy/sync_from_github.sh` 从 GitHub 拉取
+  （`~/deploy-sync.log`），日志里能看到每次的 `清单 xxx → yyy` 与跳过原因。

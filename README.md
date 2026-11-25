@@ -1,8 +1,10 @@
 # 涨停强势股短线系统 · 设计与可行性验证 v0.1
 
 > **部署纪律：VPS 上运行的代码必须来源于 Git 仓库的某个 commit。**
-> 统一用 [`deploy/deploy_vps.sh`](deploy/deploy_vps.sh) 部署，禁止 SSH 直接改 VPS 文件；
-> `status.py` / `watchdog.py` 会校验运行代码与部署清单是否一致。详见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
+> 默认由 VPS 上的 [`deploy/sync_from_github.sh`](deploy/sync_from_github.sh) 从 GitHub 拉取并调用
+> [`deploy/deploy_vps.sh`](deploy/deploy_vps.sh) 部署（cron 每交易日 08:45 / 15:45 各跑一次），
+> 禁止 SSH 直接改 VPS 文件；`status.py` / `watchdog.py` 会校验运行代码与部署清单是否一致。
+> 详见 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
 
 把岑若曦《短线的最高境界是不停的追逐涨停》里的 22 条经验法则，拼装成一条**可执行、无内部矛盾**的决策链，
 并在**不跑回测、不查行情数据**的前提下，先判断它是否值得去回测。
@@ -31,7 +33,8 @@
 | [`feasibility/charts.py`](feasibility/charts.py) | 出图 |
 | [`deploy/daban_paper/`](deploy/daban_paper/) | **打板模拟盘代码**（已部署到 VPS，每交易日 16:10 自动跑 + 微信推送） |
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | **部署纪律**：VPS 代码只能来自仓库 commit，统一用 `deploy_vps.sh` 部署 |
-| [`deploy/deploy_vps.sh`](deploy/deploy_vps.sh) | VPS 唯一部署入口：fetch → 校验 commit → 自检 → rsync → 写部署清单 |
+| [`deploy/sync_from_github.sh`](deploy/sync_from_github.sh) | VPS 同步入口：fetch → 比对清单 → 落后才调 `deploy_vps.sh`（幂等，cron 用） |
+| [`deploy/deploy_vps.sh`](deploy/deploy_vps.sh) | VPS 部署执行器：fetch → 校验 commit → 自检 → rsync → 写部署清单 |
 | [`docs/03_常规版_量价择时系统_v1.0.md`](docs/03_常规版_量价择时系统_v1.0.md) | **常规版机制**：八条口诀 → 门控/选股/持有/卖出/推送 |
 | [`docs/04_常规版_参数手册.md`](docs/04_常规版_参数手册.md) | 常规版 113 个标准参数的默认值、区间、敏感度、口诀映射 |
 | [`config/regular_v1.yaml`](config/regular_v1.yaml) | 常规版唯一参数源（62 个可调 / 51 个冻结，3 个风险档） |
