@@ -110,9 +110,11 @@ for app in "${need[@]}"; do
     fi
 done
 
-if [ "$fail" = 0 ]; then
-    log "同步完成：${HASH:0:7}"
-else
+if [ "$fail" != 0 ]; then
     log "同步有失败项，见上面的 deploy 日志"
+elif [ "$DRY_RUN" = 1 ]; then
+    log "dry-run 结束（未改动任何文件）"
+else
+    log "同步完成：${HASH:0:7}"
 fi
 exit "$fail"
